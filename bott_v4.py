@@ -88,12 +88,11 @@ APPROACH_R       = 2.0    # place limit saat harga dalam 2R dari entry
 REQUIRE_BOS      = False  # True = BOS H1 dulu; False = FVG kuat langsung (FVG-only mode)
 
 SYMBOLS = [
-    # 14 coin aktif — sinkron dengan backtest fvg_limit Jan2025–Apr2026
+    # 12 coin aktif — hapus SOLUSDT, BELUSDT
     '1000BONKUSDT', 'BERAUSDT', 'SHIB1000USDT', 'JUPUSDT',
     'ORCAUSDT', 'XRPUSDT', 'TAOUSDT',
-    'SOLUSDT', 'AAVEUSDT',
-    'GMXUSDT', 'LTCUSDT', 'ICPUSDT',
-    'BELUSDT', 'VIRTUALUSDT',
+    'AAVEUSDT', 'GMXUSDT', 'LTCUSDT',
+    'ICPUSDT', 'VIRTUALUSDT',
 ]
 
 ATR_THRESHOLD = {
@@ -105,13 +104,28 @@ ATR_THRESHOLD = {
     'ORCAUSDT'      : 0.0021,   # P25=0.214%
     'XRPUSDT'       : 0.0018,   # P25=0.185%
     'TAOUSDT'       : 0.0031,   # P25=0.313%
-    'SOLUSDT'       : 0.0022,   # P25=0.217%
     'AAVEUSDT'      : 0.0026,   # P25=0.259%
     'GMXUSDT'       : 0.0020,   # P25=0.203%
     'LTCUSDT'       : 0.0018,   # P25=0.178%
     'ICPUSDT'       : 0.0023,   # P25=0.231%
-    'BELUSDT'       : 0.0021,   # P25=0.214%
     'VIRTUALUSDT'   : 0.0036,   # P25=0.363%
+}
+
+# ── Fixed SL distance per coin (avg C1 range dari backtest Jan2025–Apr2026) ──
+# dist = nilai harga fixed, bukan % — menggantikan c1_close - c1_low/high
+FIXED_DIST_PER_COIN = {
+    '1000BONKUSDT' : 0.000210,
+    'AAVEUSDT'     : 2.284569,
+    'BERAUSDT'     : 0.047505,
+    'GMXUSDT'      : 0.152497,
+    'ICPUSDT'      : 0.053991,
+    'JUPUSDT'      : 0.005525,
+    'LTCUSDT'      : 0.757429,
+    'ORCAUSDT'     : 0.024775,
+    'SHIB1000USDT' : 0.000098,
+    'TAOUSDT'      : 4.415704,
+    'VIRTUALUSDT'  : 0.020281,
+    'XRPUSDT'      : 0.017680,
 }
 
 pending          = {}
@@ -1005,6 +1019,11 @@ def run_bot():
                                     else:
                                         dist_n = max(c1_h - c1_c, 0.0)
                                         entry_n = c1_c; sl_n = c1_h
+                                    # Fixed pip: override dist & sl
+                                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
+                                    if _fd > 0:
+                                        dist_n = _fd
+                                        sl_n   = c1_c - dist_n if new_st == 'Long' else c1_c + dist_n
                                     if dist_n >= c1_c * 0.002:
                                         pending[coin] = {
                                             'type': new_st, 'phase': 'WAIT_APPROACH',
@@ -1390,6 +1409,11 @@ def run_bot():
                     else:
                         dist = max(c1_h - c1_c, 0.0)
                         entry_adj = c1_c; sl_entry = c1_h
+                    # Fixed pip: override dist & sl dengan nilai rata-rata historis
+                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
+                    if _fd > 0:
+                        dist     = _fd
+                        sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
                     if dist < c1_c * 0.002:
                         print(f"   {coin}: FVG dist terlalu kecil ({dist/c1_c*100:.3f}%)")
                         continue
@@ -1497,7 +1521,11 @@ def run_bot():
                         entry_adj = c1_c
                         dist      = max(c1_h - c1_c, 0.0)
                         sl_entry  = c1_h
-
+                    # Fixed pip: override dist & sl dengan nilai rata-rata historis
+                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
+                    if _fd > 0:
+                        dist     = _fd
+                        sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
                     if dist < c1_c * 0.002:
                         continue  # SL terlalu dekat entry
 
