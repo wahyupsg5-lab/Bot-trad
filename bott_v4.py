@@ -79,6 +79,7 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 # ║ CONFIG TERKUNCI (divalidasi backtest 13 coin, 2025 train + 2026 OOS):  ║
 # ║  • fvg_limit, FVG-only (REQUIRE_BOS=False)                             ║
 # ║  • SL_FRAC = 0.5  (SL dipotong 50% dari range C1)                      ║
+# ║  • MIN_DIST_FLOOR = True (dist <0.2% pakai SL min, bukan di-skip)      ║
 # ║  • TANPA partial TP — trailing runner penuh (terbukti partial+BE rugi) ║
 # ║  • DIR_FILTER & DIST_FILTER OFF (tidak diterapkan); SESSION no-op      ║
 # ║  • Trail 0.5R aktif @ +2.5R, timeout 3 hari, risk 1%, MAX 5 posisi     ║
@@ -97,6 +98,7 @@ MAX_CONCURRENT   = 5      # maks order limit aktif + posisi bersamaan
 APPROACH_R       = 2.0    # place limit saat harga dalam 2R dari entry
 REQUIRE_BOS      = False  # True = BOS H1 dulu; False = FVG kuat langsung (FVG-only mode)
 SL_FRAC          = 0.5    # potong jarak SL (= dist dari c1_low/high) — 0.5 = 50%, 1.0 = penuh
+MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 
 SYMBOLS = [
     # 13 coin — config terkunci (sinkron backtest: SL x0.5, no partial, trail penuh)
@@ -1478,9 +1480,14 @@ def run_bot():
                         _ses_allowed = SESSION_FILTER.get(coin)
                         if _ses_allowed is not None and _sesi not in _ses_allowed:
                             continue
-                    if dist < c1_c * 0.002:
-                        print(f"   {coin}: FVG dist terlalu kecil ({dist/c1_c*100:.3f}%)")
-                        continue
+                    min_d = c1_c * 0.002
+                    if dist < min_d:
+                        if MIN_DIST_FLOOR:
+                            dist = min_d
+                            sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
+                        else:
+                            print(f"   {coin}: FVG dist terlalu kecil ({dist/c1_c*100:.3f}%)")
+                            continue
                     existing = pending.get(coin)
                     old_ocl = existing.get('orig_ocl', 0) if existing else 0
                     if existing and abs(c1_c - old_ocl) / max(c1_c, 1e-9) < 0.001 and existing.get('type') == stype:
@@ -1595,8 +1602,13 @@ def run_bot():
                         _ses_allowed = SESSION_FILTER.get(coin)
                         if _ses_allowed is not None and _sesi not in _ses_allowed:
                             continue
-                    if dist < c1_c * 0.002:
-                        continue  # SL terlalu dekat entry
+                    min_d = c1_c * 0.002
+                    if dist < min_d:
+                        if MIN_DIST_FLOOR:
+                            dist = min_d
+                            sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
+                        else:
+                            continue  # SL terlalu dekat entry
 
                     # OCL flip: BOS sama + OCL sama → entry dibalik (zone sudah ditest)
                     done = done_setups.get(coin)
