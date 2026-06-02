@@ -101,11 +101,12 @@ SL_FRAC          = 0.5    # potong jarak SL (= dist dari c1_low/high) — 0.5 = 
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 
 SYMBOLS = [
-    # 13 coin — config terkunci (sinkron backtest: SL x0.5, no partial, trail penuh)
-    '1000BONKUSDT', 'BERAUSDT', 'SHIB1000USDT', 'JUPUSDT',
-    'ORCAUSDT', 'XRPUSDT', 'TAOUSDT',
-    'SOLUSDT', 'AAVEUSDT', 'GMXUSDT', 'LTCUSDT',
-    'ICPUSDT', 'VIRTUALUSDT',
+    # 20 coin — sinkron dengan backtest (Trade ≥ 50, minus STX & AAVE)
+    '1000BONKUSDT', 'BERAUSDT', 'JUPUSDT', 'ORCAUSDT', 'TAOUSDT',
+    'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
+    'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
+    'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
+    'EIGENUSDT',
 ]
 
 ATR_THRESHOLD = {
