@@ -75,6 +75,16 @@ if not API_KEY or not API_SECRET:
 session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ CONFIG TERKUNCI (divalidasi backtest 13 coin, 2025 train + 2026 OOS):  ║
+# ║  • fvg_limit, FVG-only (REQUIRE_BOS=False)                             ║
+# ║  • SL_FRAC = 0.5  (SL dipotong 50% dari range C1)                      ║
+# ║  • TANPA partial TP — trailing runner penuh (terbukti partial+BE rugi) ║
+# ║  • DIR_FILTER & DIST_FILTER OFF (tidak diterapkan); SESSION no-op      ║
+# ║  • Trail 0.5R aktif @ +2.5R, timeout 3 hari, risk 1%, MAX 5 posisi     ║
+# ║ Ekspektasi realistis: ~45% WR, median trade RUGI ~1R, profit ditopang  ║
+# ║ runner langka. Jangan ubah tanpa re-backtest.                          ║
+# ╚══════════════════════════════════════════════════════════════════════╝
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
 TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
 TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
@@ -86,12 +96,13 @@ MAX_GAP_PCT      = 0.006  # max gap_size / entry_price (FVG ≤ 0.60%)
 MAX_CONCURRENT   = 5      # maks order limit aktif + posisi bersamaan
 APPROACH_R       = 2.0    # place limit saat harga dalam 2R dari entry
 REQUIRE_BOS      = False  # True = BOS H1 dulu; False = FVG kuat langsung (FVG-only mode)
+SL_FRAC          = 0.5    # potong jarak SL (= dist dari c1_low/high) — 0.5 = 50%, 1.0 = penuh
 
 SYMBOLS = [
-    # 12 coin aktif — hapus SOLUSDT, BELUSDT
+    # 13 coin — config terkunci (sinkron backtest: SL x0.5, no partial, trail penuh)
     '1000BONKUSDT', 'BERAUSDT', 'SHIB1000USDT', 'JUPUSDT',
     'ORCAUSDT', 'XRPUSDT', 'TAOUSDT',
-    'AAVEUSDT', 'GMXUSDT', 'LTCUSDT',
+    'SOLUSDT', 'AAVEUSDT', 'GMXUSDT', 'LTCUSDT',
     'ICPUSDT', 'VIRTUALUSDT',
 ]
 
@@ -111,22 +122,60 @@ ATR_THRESHOLD = {
     'VIRTUALUSDT'   : 0.0036,   # P25=0.363%
 }
 
-# ── Fixed SL distance per coin (avg C1 range dari backtest Jan2025–Apr2026) ──
-# dist = nilai harga fixed, bukan % — menggantikan c1_close - c1_low/high
-FIXED_DIST_PER_COIN = {
-    '1000BONKUSDT' : 0.000210,
-    'AAVEUSDT'     : 2.284569,
-    'BERAUSDT'     : 0.047505,
-    'GMXUSDT'      : 0.152497,
-    'ICPUSDT'      : 0.053991,
-    'JUPUSDT'      : 0.005525,
-    'LTCUSDT'      : 0.757429,
-    'ORCAUSDT'     : 0.024775,
-    'SHIB1000USDT' : 0.000098,
-    'TAOUSDT'      : 4.415704,
-    'VIRTUALUSDT'  : 0.020281,
-    'XRPUSDT'      : 0.017680,
+# ── Dist range filter: skip setup kalau dist% di luar sweet spot ────────────
+# dist% = (c1_close - c1_low/high) / c1_close × 100
+# Range dari bucket analysis backtest Jan2025-Apr2026 (dist dinamis).
+DIST_RANGE_FILTER = {
+    '1000BONKUSDT' : (0.4, 0.8),   # 0.4-0.6: WR=48% N=159, 0.6-0.8: WR=47% N=53
+    'AAVEUSDT'     : (0.6, 1.5),   # 0.8-1: WR=46% N=151, 0.6-0.8: WR=46% N=124
+    'BERAUSDT'     : (0.6, 1.5),   # 0.6-0.8: WR=50% N=117, 0.8-1: WR=50% N=198
+    'GMXUSDT'      : (1.0, 2.0),   # 1-1.5: WR=47% N=270
+    'ICPUSDT'      : (0.6, 1.5),   # 0.8-1: WR=50% N=111, 1-1.5: WR=46% N=226
+    'JUPUSDT'      : (1.0, 2.0),   # 1-1.5: WR=47% N=127, 1.5-2: WR=49% N=111
+    'LTCUSDT'      : (0.6, 1.5),   # 0.8-1: WR=49% N=123, 1.5-2: WR=46% N=71
+    'ORCAUSDT'     : (0.6, 1.5),   # 0.8-1: WR=51% N=196 ★
+    'SHIB1000USDT' : (1.0, 2.5),   # 1-1.5: WR=47% N=135, 1.5-2: WR=49% N=121
+    'SOLUSDT'      : (1.0, 1.5),   # 1-1.5: WR=50% N=117
+    'TAOUSDT'      : (0.6, 1.0),   # 0.8-1: WR=65% N=63 ★, 0.4-0.6: WR=49% N=211
+    'VIRTUALUSDT'  : (0.6, 1.5),   # 0.8-1: WR=48% N=82
+    'XRPUSDT'      : (0.4, 0.8),   # 0.4-0.6: WR=44% N=114, 0.6-0.8: WR=46% N=113
 }
+
+# ── Direction filter per coin ────────────────────────────────────────────────
+# Dari analisis win/loss backtest: hanya ambil arah yang WR tinggi.
+DIR_FILTER: dict = {
+    'JUPUSDT'      : 'Short',
+    'AAVEUSDT'     : 'Short',
+    '1000BONKUSDT' : 'Short',
+    'BERAUSDT'     : None,
+    'GMXUSDT'      : None,
+    'ICPUSDT'      : None,
+    'ORCAUSDT'     : None,
+    'SHIB1000USDT' : None,
+    'SOLUSDT'      : None,
+    'TAOUSDT'      : None,
+    'VIRTUALUSDT'  : None,
+    'XRPUSDT'      : None,
+    'LTCUSDT'      : None,
+}
+
+# ── Session filter per coin ──────────────────────────────────────────────────
+SESSION_FILTER: dict = {
+    '1000BONKUSDT' : None,
+    'AAVEUSDT'     : None,
+    'BERAUSDT'     : None,
+    'GMXUSDT'      : None,
+    'ICPUSDT'      : None,
+    'JUPUSDT'      : None,
+    'LTCUSDT'      : None,
+    'ORCAUSDT'     : None,
+    'SHIB1000USDT' : None,
+    'SOLUSDT'      : None,
+    'TAOUSDT'      : None,
+    'VIRTUALUSDT'  : None,
+    'XRPUSDT'      : None,
+}
+
 
 pending          = {}
 active_positions = {}
@@ -413,6 +462,12 @@ def place_market_order(symbol, side, entry, sl, trail_dist):
             print(f"⚠️ {symbol}: Qty {qty} < minOrderQty {info['min_qty']}, skip.")
             return None
 
+        order_value = qty * entry
+        if order_value < 5.0:
+            print(f"⚠️ {symbol}: Order value ~${order_value:.2f} < $5 minimum Bybit, skip "
+                  f"(balance ${balance:.2f}, risk ${risk_usd:.2f}, dist {dist:.6f}).")
+            return None
+
         sl_r         = round_price(sl,         info['tick_size'])
         trail_dist_r = round_price(trail_dist,  info['tick_size'])
         if trail_dist_r <= 0:
@@ -510,6 +565,12 @@ def place_limit_order(symbol, side, entry_p, sl_p):
         qty     = round_qty(raw_qty, info['qty_step'])
         if qty < info['min_qty']:
             print(f"⚠️ {symbol}: Qty {qty} < minOrderQty {info['min_qty']}, skip.")
+            return None
+
+        order_value = qty * entry_p
+        if order_value < 5.0:
+            print(f"⚠️ {symbol}: Order value ~${order_value:.2f} < $5 minimum Bybit, skip "
+                  f"(balance ${balance:.2f}, risk ${risk_usd:.2f}, dist {dist:.6f}).")
             return None
 
         entry_r  = round_price(entry_p,                     info['tick_size'])
@@ -1019,11 +1080,6 @@ def run_bot():
                                     else:
                                         dist_n = max(c1_h - c1_c, 0.0)
                                         entry_n = c1_c; sl_n = c1_h
-                                    # Fixed pip: override dist & sl
-                                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
-                                    if _fd > 0:
-                                        dist_n = _fd
-                                        sl_n   = c1_c - dist_n if new_st == 'Long' else c1_c + dist_n
                                     if dist_n >= c1_c * 0.002:
                                         pending[coin] = {
                                             'type': new_st, 'phase': 'WAIT_APPROACH',
@@ -1103,6 +1159,9 @@ def run_bot():
                                     setup['order_id'] = order_id
                                     print(f"📍 {coin}: Limit dipasang @ {entry:.6f} "
                                           f"(harga {curr_price:.6f} dalam {APPROACH_R}R)")
+                                else:
+                                    # Jika gagal karena order value < $5 → batalkan setup, jangan retry
+                                    del pending[coin]
                         continue
 
                     # ── WAIT_FILL: limit order placed, nunggu fill ──────
@@ -1296,9 +1355,9 @@ def run_bot():
                                     continue
                                 trigger_lvl = c1_close   # entry juga di sini (market order)
                                 if stype == "Long":
-                                    sl_nat = c1_low - gap_size * 0.1
+                                    sl_nat = c1_close - (c1_close - c1_low) * SL_FRAC
                                 else:
-                                    sl_nat = c1_high + gap_size * 0.1
+                                    sl_nat = c1_close + (c1_high - c1_close) * SL_FRAC
                             else:
                                 ocl = float(fvg.get('c3_open',
                                             fvg['bottom'] if stype == 'Short' else fvg['top']))
@@ -1404,16 +1463,21 @@ def run_bot():
                     c1_l = float(chosen_fvg['c1_low'])
                     c1_h = float(chosen_fvg['c1_high'])
                     if stype == 'Long':
-                        dist = max(c1_c - c1_l, 0.0)
-                        entry_adj = c1_c; sl_entry = c1_l
+                        dist = max(c1_c - c1_l, 0.0) * SL_FRAC
+                        entry_adj = c1_c; sl_entry = c1_c - dist
                     else:
-                        dist = max(c1_h - c1_c, 0.0)
-                        entry_adj = c1_c; sl_entry = c1_h
-                    # Fixed pip: override dist & sl dengan nilai rata-rata historis
-                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
-                    if _fd > 0:
-                        dist     = _fd
-                        sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
+                        dist = max(c1_h - c1_c, 0.0) * SL_FRAC
+                        entry_adj = c1_c; sl_entry = c1_c + dist
+
+
+                    # Session filter
+                    import datetime as _dt
+                    _h_s = _dt.datetime.utcfromtimestamp(h1_df.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in h1_df.columns else -1
+                    if _h_s >= 0:
+                        _sesi = 'Asia' if _h_s < 8 else ('London' if _h_s < 13 else 'NY')
+                        _ses_allowed = SESSION_FILTER.get(coin)
+                        if _ses_allowed is not None and _sesi not in _ses_allowed:
+                            continue
                     if dist < c1_c * 0.002:
                         print(f"   {coin}: FVG dist terlalu kecil ({dist/c1_c*100:.3f}%)")
                         continue
@@ -1512,20 +1576,25 @@ def run_bot():
                     c1_h   = float(chosen_fvg['c1_high'])
                     gap_s  = float(chosen_fvg['top']) - float(chosen_fvg['bottom'])
 
-                    # Entry di OCL (c1_close), SL di c1_low/c1_high (ujung 100% c1)
+                    # Entry di OCL (c1_close), SL di c1_low/c1_high × SL_FRAC
                     if stype == 'Long':
                         entry_adj = c1_c
-                        dist      = max(c1_c - c1_l, 0.0)
-                        sl_entry  = c1_l
+                        dist      = max(c1_c - c1_l, 0.0) * SL_FRAC
+                        sl_entry  = c1_c - dist
                     else:
                         entry_adj = c1_c
-                        dist      = max(c1_h - c1_c, 0.0)
-                        sl_entry  = c1_h
-                    # Fixed pip: override dist & sl dengan nilai rata-rata historis
-                    _fd = FIXED_DIST_PER_COIN.get(coin, 0.0)
-                    if _fd > 0:
-                        dist     = _fd
-                        sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
+                        dist      = max(c1_h - c1_c, 0.0) * SL_FRAC
+                        sl_entry  = c1_c + dist
+
+
+                    # Session filter
+                    import datetime as _dt
+                    _h_s = _dt.datetime.utcfromtimestamp(h1_df.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in h1_df.columns else -1
+                    if _h_s >= 0:
+                        _sesi = 'Asia' if _h_s < 8 else ('London' if _h_s < 13 else 'NY')
+                        _ses_allowed = SESSION_FILTER.get(coin)
+                        if _ses_allowed is not None and _sesi not in _ses_allowed:
+                            continue
                     if dist < c1_c * 0.002:
                         continue  # SL terlalu dekat entry
 
