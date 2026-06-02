@@ -1472,7 +1472,7 @@ def run_bot():
 
                     # Session filter
                     import datetime as _dt
-                    _h_s = _dt.datetime.utcfromtimestamp(h1_df.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in h1_df.columns else -1
+                    _h_s = _dt.datetime.utcfromtimestamp(df_h1_live.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in df_h1_live.columns else -1
                     if _h_s >= 0:
                         _sesi = 'Asia' if _h_s < 8 else ('London' if _h_s < 13 else 'NY')
                         _ses_allowed = SESSION_FILTER.get(coin)
@@ -1589,7 +1589,7 @@ def run_bot():
 
                     # Session filter
                     import datetime as _dt
-                    _h_s = _dt.datetime.utcfromtimestamp(h1_df.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in h1_df.columns else -1
+                    _h_s = _dt.datetime.utcfromtimestamp(df_h1_live.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in df_h1_live.columns else -1
                     if _h_s >= 0:
                         _sesi = 'Asia' if _h_s < 8 else ('London' if _h_s < 13 else 'NY')
                         _ses_allowed = SESSION_FILTER.get(coin)
