@@ -76,15 +76,17 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║ CONFIG TERKUNCI (divalidasi backtest 13 coin, 2025 train + 2026 OOS):  ║
-# ║  • fvg_limit, FVG-only (REQUIRE_BOS=False)                             ║
-# ║  • SL_FRAC = 0.5  (SL dipotong 50% dari range C1)                      ║
-# ║  • MIN_DIST_FLOOR = True (dist <0.2% pakai SL min, bukan di-skip)      ║
-# ║  • TANPA partial TP — trailing runner penuh (terbukti partial+BE rugi) ║
-# ║  • DIR_FILTER & DIST_FILTER OFF (tidak diterapkan); SESSION no-op      ║
+# ║ CONFIG AKTIF: ENTRY_EXP = 'wait_rev' (Test2 — momentum/breakout)       ║
+# ║  • FVG-only (REQUIRE_BOS=False), SL_FRAC=0.5, MIN_DIST_FLOOR=True      ║
+# ║  • wait_rev: sentuh c1_close → tunggu ∓1R → MARKET arah berlawanan;    ║
+# ║    batal kalau searah FVG ±3R duluan. SL di c1_close. TANPA reverse.   ║
 # ║  • Trail 0.5R aktif @ +2.5R, timeout 3 hari, risk 1%, MAX 5 posisi     ║
-# ║ Ekspektasi realistis: ~45% WR, median trade RUGI ~1R, profit ditopang  ║
-# ║ runner langka. Jangan ubah tanpa re-backtest.                          ║
+# ║ Validasi backtest 20 coin (slip 5bps): WR~70%, medianR +3.8,           ║
+# ║   meanR(cap+5) ~+2.6 di train DAN OOS. SHORT robust; LONG lemah di     ║
+# ║   downtrend 2026. meanR mentah digelembungkan trailing ideal → live    ║
+# ║   PASTI lebih rendah. Short = mesin utama.                             ║
+# ║ ⚠️ JALUR ORDER BARU BELUM DIUJI LIVE — TESTNET/modal kecil dulu!       ║
+# ║ Revert ke lama: set ENTRY_EXP='baseline'.                              ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
 TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
@@ -99,6 +101,16 @@ APPROACH_R       = 2.0    # place limit saat harga dalam 2R dari entry
 REQUIRE_BOS      = False  # True = BOS H1 dulu; False = FVG kuat langsung (FVG-only mode)
 SL_FRAC          = 0.5    # potong jarak SL (= dist dari c1_low/high) — 0.5 = 50%, 1.0 = penuh
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
+
+# ── Mode entry eksperimen (Test2 — sinkron backtest EXP_ENTRY='wait_rev') ────
+# 'baseline' = entry limit di c1_close lalu reverse saat SL (perilaku live saat ini).
+# 'wait_rev' = tunggu harga SENTUH c1_close → lalu tunggu -WAIT_REV_R (FVG long) /
+#              +WAIT_REV_R (FVG short) → MARKET order arah berlawanan (momentum/breakout);
+#              batal kalau searah FVG +WAIT_REV_CANCEL_R duluan. SL di c1_close. Tanpa reverse.
+# ⚠️ wait_rev = jalur order BARU yang BELUM diuji live. Validasi di TESTNET dulu!
+ENTRY_EXP         = 'wait_rev'
+WAIT_REV_R        = 1.0
+WAIT_REV_CANCEL_R = 3.0
 
 SYMBOLS = [
     # 20 coin — sinkron dengan backtest (Trade ≥ 50, minus STX & AAVE)
@@ -1058,6 +1070,88 @@ def run_bot():
                             done_setups.pop(coin, None)
                             print(f"🔄 {coin}: CHOCH — swing high {choch_level:.6f} ditembus. Setup batal.")
                             del pending[coin]; continue
+
+                    # ── MODE wait_rev (Test2): sentuh c1_close → tunggu ∓1R → MARKET reverse ──
+                    if ENTRY_EXP == 'wait_rev':
+                        ocl  = setup.get('ocl', setup['entry'])
+                        dist = setup['dist']
+                        px   = float(curr_h1['close'])
+                        # Gate 1: harga harus SENTUH c1_close (FVG fill) dulu
+                        if not setup.get('exp_touched'):
+                            if (stype == 'Long'  and px <= ocl) or \
+                               (stype == 'Short' and px >= ocl):
+                                setup['exp_touched'] = True
+                                print(f"👁️  {coin}: c1_close {ocl:.6f} tersentuh → pantau trigger reverse")
+                            else:
+                                print(f"⏳ {coin}: {stype} nunggu sentuh c1_close {ocl:.6f} (now {px:.6f})")
+                            continue
+                        # Gate 2: trigger ∓WAIT_REV_R → reverse; batal kalau searah FVG ±CANCEL_R duluan
+                        if stype == 'Long':       # FVG long → SHORT di -WAIT_REV_R
+                            trig = ocl - WAIT_REV_R * dist
+                            cncl = ocl + WAIT_REV_CANCEL_R * dist
+                            rev_side, rev_stype = 'Sell', 'Short'
+                            cancel_hit = px >= cncl
+                            trig_hit   = px <= trig
+                        else:                     # FVG short → LONG di +WAIT_REV_R
+                            trig = ocl + WAIT_REV_R * dist
+                            cncl = ocl - WAIT_REV_CANCEL_R * dist
+                            rev_side, rev_stype = 'Buy', 'Long'
+                            cancel_hit = px <= cncl
+                            trig_hit   = px >= trig
+                        if cancel_hit:
+                            print(f"❌ {coin}: searah FVG +{WAIT_REV_CANCEL_R}R duluan ({px:.6f}) — setup batal.")
+                            done_setups.pop(coin, None)
+                            del pending[coin]; continue
+                        if not trig_hit:
+                            print(f"⏳ {coin}: nunggu trigger {rev_stype} @ {trig:.6f} (now {px:.6f})")
+                            continue
+                        # Trigger kena → MARKET order arah berlawanan (pakai jalur yang sama dgn reverse)
+                        active_count = len(active_positions) + sum(
+                            1 for s in pending.values() if s.get('phase') == 'WAIT_FILL')
+                        if active_count >= MAX_CONCURRENT:
+                            print(f"⏸️  {coin}: trigger reverse tapi slot penuh ({active_count}/{MAX_CONCURRENT})")
+                            continue
+                        rev_sl    = ocl                    # SL di c1_close (= 1R dari entry)
+                        rev_trail = TRAIL_STOP * dist
+                        print(f"🔄 {coin}: trigger {WAIT_REV_R}R → MARKET {rev_stype} @ ~{trig:.6f} (SL {rev_sl:.6f})")
+                        oid = place_market_order(coin, rev_side, trig, rev_sl, rev_trail)
+                        if oid:
+                            time.sleep(1)
+                            pos_new = get_open_position(coin)
+                            if pos_new:
+                                ent_a = float(pos_new.get('avgPrice', trig))
+                                active_positions[coin] = {
+                                    'side'          : rev_side,
+                                    'entry'         : ent_a,
+                                    'sl'            : rev_sl,
+                                    'dist'          : dist,
+                                    'trail_dist'    : rev_trail,
+                                    'trail_engaged' : False,
+                                    'trail_set'     : False,
+                                    'last_price'    : ent_a,
+                                    'entry_time'    : time.time(),
+                                    'peak'          : ent_a,
+                                    'peak_time'     : time.time(),
+                                    'swing_val'     : setup.get('swing_val'),
+                                    'bos_type'      : rev_stype,
+                                    'rev_count'     : 1,    # blok reverse lanjutan (Test2 = tanpa reverse)
+                                    'orig_ocl'      : ocl,
+                                }
+                                done_setups[coin] = {
+                                    'swing_val': setup.get('swing_val'),
+                                    'stype'    : stype,
+                                    'used_ocl' : ocl,
+                                }
+                                del pending[coin]
+                                print(f"✅ {coin}: {rev_stype} entry {ent_a:.6f} sl {rev_sl:.6f} (wait_rev)")
+                            else:
+                                print(f"⚠️ {coin}: market order placed tapi posisi belum terdeteksi.")
+                                del pending[coin]
+                        else:
+                            print(f"⚠️ {coin}: gagal MARKET order wait_rev — batal.")
+                            done_setups.pop(coin, None)
+                            del pending[coin]
+                        continue
 
                     if setup.get('fvg_only'):
                         # FVG-only: cek apakah ada FVG lebih baru → ganti setup
