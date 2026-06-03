@@ -1078,6 +1078,29 @@ def run_bot():
                         px   = float(curr_h1['close'])
                         # Gate 1: harga harus SENTUH c1_close (FVG fill) dulu
                         if not setup.get('exp_touched'):
+                            # Re-deteksi FVG TERBARU (arah apa pun) selama belum sentuh c1_close
+                            new_ch, new_st = _scan_fvg_only(df_h1_live)
+                            if new_ch:
+                                n_ocl = float(new_ch.get('c1_close', 0))
+                                if n_ocl > 0 and (new_st != stype or
+                                                  abs(n_ocl - ocl) / max(n_ocl, 1e-9) > 0.001):
+                                    c1l = float(new_ch.get('c1_low', 0))
+                                    c1h = float(new_ch.get('c1_high', 0))
+                                    d_raw = (n_ocl - c1l) if new_st == 'Long' else (c1h - n_ocl)
+                                    d_n = max(d_raw, 0.0) * SL_FRAC
+                                    if MIN_DIST_FLOOR and d_n < n_ocl * 0.002:
+                                        d_n = n_ocl * 0.002
+                                    if d_n > 0:
+                                        print(f"🔄 {coin}: wait_rev FVG baru {new_st} @ {n_ocl:.6f} "
+                                              f"gantikan {stype} @ {ocl:.6f}")
+                                        pending[coin] = {
+                                            'type': new_st, 'phase': 'WAIT_APPROACH',
+                                            'entry': n_ocl, 'ocl': n_ocl,
+                                            'sl': (n_ocl - d_n if new_st == 'Long' else n_ocl + d_n),
+                                            'dist': d_n, 'orig_ocl': n_ocl,
+                                            'choch_level': None, 'swing_val': None, 'fvg_only': True,
+                                        }
+                                        continue
                             if (stype == 'Long'  and px <= ocl) or \
                                (stype == 'Short' and px >= ocl):
                                 setup['exp_touched'] = True
