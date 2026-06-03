@@ -80,7 +80,8 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 # ║  • FVG-only (REQUIRE_BOS=False), SL_FRAC=0.5, MIN_DIST_FLOOR=True      ║
 # ║  • wait_rev: sentuh c1_close → tunggu ∓1R → MARKET arah berlawanan;    ║
 # ║    batal kalau searah FVG ±3R duluan. SL di c1_close. TANPA reverse.   ║
-# ║  • Trail 0.5R aktif @ +2.5R, timeout 3 hari, risk 1%, MAX 5 posisi     ║
+# ║  • Trail 0.5R aktif @ +2.5R, timeout 3 hari, risk 1%/posisi            ║
+# ║  • Slot = berbasis MARGIN (buka selama margin cukup); cap aman 12 posisi║
 # ║ Validasi backtest 20 coin (slip 5bps): WR~70%, medianR +3.8,           ║
 # ║   meanR(cap+5) ~+2.6 di train DAN OOS. SHORT robust; LONG lemah di     ║
 # ║   downtrend 2026. meanR mentah digelembungkan trailing ideal → live    ║
@@ -96,7 +97,9 @@ SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False =
 ENTRY_MODE       = 'fvg_limit'  # 'fvg_sbr' (market saat touch) | 'fvg_limit' (limit langsung di BOS)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
 MAX_GAP_PCT      = 0.006  # max gap_size / entry_price (FVG ≤ 0.60%)
-MAX_CONCURRENT   = 5      # maks order limit aktif + posisi bersamaan
+MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
+                          # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
+                          #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
 APPROACH_R       = 2.0    # place limit saat harga dalam 2R dari entry
 REQUIRE_BOS      = False  # True = BOS H1 dulu; False = FVG kuat langsung (FVG-only mode)
 SL_FRAC          = 0.5    # potong jarak SL (= dist dari c1_low/high) — 0.5 = 50%, 1.0 = penuh
@@ -1122,31 +1125,42 @@ def run_bot():
                             else:
                                 print(f"⏳ {coin}: {stype} nunggu sentuh c1_close {ocl:.6f} (now {px:.6f})")
                             continue
-                        # Gate 2: trigger ∓WAIT_REV_R → reverse; batal kalau searah FVG ±CANCEL_R duluan
+                        # Gate 2: trigger ∓WAIT_REV_R → reverse
                         if stype == 'Long':       # FVG long → SHORT di -WAIT_REV_R
                             trig = ocl - WAIT_REV_R * dist
-                            cncl = ocl + WAIT_REV_CANCEL_R * dist
                             rev_side, rev_stype = 'Sell', 'Short'
-                            cancel_hit = px >= cncl
-                            trig_hit   = px <= trig
+                            trig_hit  = px <= trig
+                            fvg_works = px >= ocl + WAIT_REV_CANCEL_R * dist
                         else:                     # FVG short → LONG di +WAIT_REV_R
                             trig = ocl + WAIT_REV_R * dist
-                            cncl = ocl - WAIT_REV_CANCEL_R * dist
                             rev_side, rev_stype = 'Buy', 'Long'
-                            cancel_hit = px <= cncl
-                            trig_hit   = px >= trig
-                        if cancel_hit:
-                            print(f"❌ {coin}: searah FVG +{WAIT_REV_CANCEL_R}R duluan ({px:.6f}) — setup batal.")
-                            done_setups.pop(coin, None)
-                            del pending[coin]; continue
-                        if not trig_hit:
-                            print(f"⏳ {coin}: nunggu trigger {rev_stype} @ {trig:.6f} (now {px:.6f})")
-                            continue
-                        # Trigger kena → MARKET order arah berlawanan (pakai jalur yang sama dgn reverse)
-                        # Slot = POSISI AKTIF saja: coin lain yang masih trigger-watching tidak makan slot.
+                            trig_hit  = px >= trig
+                            fvg_works = px <= ocl - WAIT_REV_CANCEL_R * dist
+
+                        if setup.get('triggered'):
+                            # Sudah trigger tapi belum dapat posisi (margin/slot penuh) → sedang retry.
+                            # Batal kalau harga ±WAIT_REV_CANCEL_R dari TITIK TRIGGER (kedua arah).
+                            if abs(px - trig) >= WAIT_REV_CANCEL_R * dist:
+                                print(f"❌ {coin}: harga ±{WAIT_REV_CANCEL_R}R dari titik trigger "
+                                      f"{trig:.6f} (now {px:.6f}) — setup batal.")
+                                done_setups.pop(coin, None)
+                                del pending[coin]; continue
+                        else:
+                            # Belum trigger: batal kalau searah FVG +WAIT_REV_CANCEL_R dari ocl (FVG bekerja)
+                            if fvg_works:
+                                print(f"❌ {coin}: searah FVG +{WAIT_REV_CANCEL_R}R duluan ({px:.6f}) — setup batal.")
+                                done_setups.pop(coin, None)
+                                del pending[coin]; continue
+                            if not trig_hit:
+                                print(f"⏳ {coin}: nunggu trigger {rev_stype} @ {trig:.6f} (now {px:.6f})")
+                                continue
+                            setup['triggered'] = True   # trigger pertama kali
+
+                        # Trigger (pertama atau retry) → MARKET order arah berlawanan.
+                        # Slot = POSISI AKTIF saja (backstop); pembatas utama = margin di place_market_order.
                         active_count = len(active_positions)
                         if active_count >= MAX_CONCURRENT:
-                            print(f"⏸️  {coin}: trigger reverse tapi slot penuh ({active_count}/{MAX_CONCURRENT})")
+                            print(f"⏸️  {coin}: backstop {active_count}/{MAX_CONCURRENT} penuh — tunggu slot.")
                             continue
                         rev_sl    = ocl                    # SL di c1_close (= 1R dari entry)
                         rev_trail = TRAIL_STOP * dist
@@ -1185,9 +1199,15 @@ def run_bot():
                                 print(f"⚠️ {coin}: market order placed tapi posisi belum terdeteksi.")
                                 del pending[coin]
                         else:
-                            print(f"⚠️ {coin}: gagal MARKET order wait_rev — batal.")
-                            done_setups.pop(coin, None)
-                            del pending[coin]
+                            # Margin penuh / order gagal → JANGAN batalkan. Retry loop berikut
+                            # (nunggu slot/margin tersedia, selama harga masih di zona & belum +3R cancel).
+                            setup['fail_count'] = setup.get('fail_count', 0) + 1
+                            print(f"⏸️  {coin}: belum bisa entry (margin penuh/order gagal) — "
+                                  f"retry ({setup['fail_count']}/30)")
+                            if setup['fail_count'] >= 30:
+                                print(f"❌ {coin}: gagal entry 30× — setup dibatalkan.")
+                                done_setups.pop(coin, None)
+                                del pending[coin]
                         continue
 
                     if setup.get('fvg_only'):
