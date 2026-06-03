@@ -1014,13 +1014,20 @@ def run_bot():
                 print(f"⚠️ Trailing SL {coin}: {e}")
 
         # Summary slot setiap M5
-        n_active   = len(active_positions)
-        n_waitfill = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_FILL')
-        n_approach = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_APPROACH')
-        slots_used = n_active + n_waitfill
+        n_active = len(active_positions)
+        if ENTRY_EXP == 'wait_rev':
+            # wait_rev: market order → slot = POSISI AKTIF saja (trigger belum makan slot)
+            n_trigger = sum(1 for s in pending.values() if s.get('exp_touched'))
+            n_watch   = sum(1 for s in pending.values() if not s.get('exp_touched'))
+            slots_used = n_active
+            cat_label  = f"posisi:{n_active} | trigger:{n_trigger} | watch:{n_watch}"
+        else:
+            n_waitfill = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_FILL')
+            n_approach = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_APPROACH')
+            slots_used = n_active + n_waitfill
+            cat_label  = f"posisi:{n_active} | limit:{n_waitfill} | watch:{n_approach}"
         print(f"\n{'='*55}")
-        print(f"📊 SLOT: {slots_used}/{MAX_CONCURRENT} terpakai "
-              f"(posisi:{n_active} | limit:{n_waitfill} | watch:{n_approach})")
+        print(f"📊 SLOT: {slots_used}/{MAX_CONCURRENT} terpakai ({cat_label})")
         if active_positions:
             print(f"   Aktif: {', '.join(active_positions.keys())}")
         if pending:
@@ -1029,7 +1036,11 @@ def run_bot():
                 print(f"   {c}: {ph} {s.get('type','?')} @ {s.get('entry',0):.6g}")
         print(f"{'='*55}")
 
-        for coin in SYMBOLS:
+        # Dahulukan coin yang sudah TRIGGER-watching (sentuh c1_close, nunggu ∓1R)
+        # supaya trigger ∓1R tertangkap lebih cepat sebelum scan coin lain.
+        _trig_first = [c for c in SYMBOLS if c in pending and pending[c].get('exp_touched')]
+        _rest       = [c for c in SYMBOLS if c not in _trig_first]
+        for coin in _trig_first + _rest:
             try:
                 time.sleep(3)
 
@@ -1132,8 +1143,8 @@ def run_bot():
                             print(f"⏳ {coin}: nunggu trigger {rev_stype} @ {trig:.6f} (now {px:.6f})")
                             continue
                         # Trigger kena → MARKET order arah berlawanan (pakai jalur yang sama dgn reverse)
-                        active_count = len(active_positions) + sum(
-                            1 for s in pending.values() if s.get('phase') == 'WAIT_FILL')
+                        # Slot = POSISI AKTIF saja: coin lain yang masih trigger-watching tidak makan slot.
+                        active_count = len(active_positions)
                         if active_count >= MAX_CONCURRENT:
                             print(f"⏸️  {coin}: trigger reverse tapi slot penuh ({active_count}/{MAX_CONCURRENT})")
                             continue
