@@ -267,6 +267,12 @@ def calc_atr(df, period=14):
 # dan TIDAK perlu konfirmasi kanan-5 — cukup close menembus swing yang sudah valid.
 SWING_BARS = 5
 
+# Filter zona entry: C1.close (entry) harus berada di retrace ENTRY_ZONE_LO..ENTRY_ZONE_HI
+# dari range BOS, di mana 0% = ekstrem impulse (swing terbaru), 100% = CHOCH (invalidasi).
+# Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
+ENTRY_ZONE_LO = 0.50
+ENTRY_ZONE_HI = 1.00
+
 def find_last_swing_bos(df, n=SWING_BARS):
     highs, lows = [], []
     hi = df['high'].values; lo = df['low'].values; ts = df['ts'].values
@@ -391,6 +397,25 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
             gaps = [g for g in gaps if g['bottom'] >= choch_level]
         else:
             gaps = [g for g in gaps if g['top'] <= choch_level]
+    # Filter ZONA ENTRY: C1.close harus di retrace ENTRY_ZONE_LO..HI dari range BOS
+    # 0% = ekstrem impulse (swing terbaru), 100% = CHOCH. Long: zona di bawah; Short: di atas.
+    if choch_level and len(df_h1) > bos_idx:
+        if stype == "Long":
+            B = float(df_h1['high'].iloc[bos_idx:].max())   # impulse high (0%)
+            L = float(choch_level)                          # invalidasi (100%)
+            rng = B - L
+            if rng > 0:
+                lo = B - ENTRY_ZONE_HI * rng                # batas terdalam (100%)
+                hi = B - ENTRY_ZONE_LO * rng                # batas terdangkal (50%)
+                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
+        else:
+            B = float(df_h1['low'].iloc[bos_idx:].min())    # impulse low (0%)
+            L = float(choch_level)                          # invalidasi (100%)
+            rng = L - B
+            if rng > 0:
+                lo = B + ENTRY_ZONE_LO * rng                # batas terdangkal (50%)
+                hi = B + ENTRY_ZONE_HI * rng                # batas terdalam (100%)
+                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
     # MAX_GAP_PCT: gap tidak boleh terlalu besar
     result = []
     for g in gaps:
