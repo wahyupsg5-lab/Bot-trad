@@ -1,1 +1,1 @@
-worker: python bott_v4.py
+web: python bott_v5_smc.py
