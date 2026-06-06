@@ -1136,15 +1136,12 @@ def run_bot():
                 if existing and existing.get('order_id'):
                     cancel_order(coin, existing['order_id'])
                 bos_ts = df_h1_live['ts'].iloc[bos_idx]
+                # Ambil FVG PERTAMA saja (gaps sudah tersaring zona 50-100% C1 di _get_fvgs)
                 chosen_fvg = None
-                for g in gaps:
-                    c1_c = float(g.get('c1_close', 0)); c1_l = float(g.get('c1_low', 0)); c1_h = float(g.get('c1_high', 0))
-                    if c1_c <= 0 or c1_h <= c1_l:
-                        continue
-                    c1_mid = (c1_h + c1_l) / 2.0
-                    if stype == "Long"  and c1_c <= c1_mid: continue
-                    if stype == "Short" and c1_c >= c1_mid: continue
-                    chosen_fvg = g; break
+                g0 = gaps[0]
+                c1_c = float(g0.get('c1_close', 0)); c1_l = float(g0.get('c1_low', 0)); c1_h = float(g0.get('c1_high', 0))
+                if c1_c > 0 and c1_h > c1_l:
+                    chosen_fvg = g0
                 if not chosen_fvg:
                     continue
                 c1_c = float(chosen_fvg['c1_close']); c1_l = float(chosen_fvg['c1_low']); c1_h = float(chosen_fvg['c1_high'])
