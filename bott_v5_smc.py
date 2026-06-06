@@ -280,7 +280,7 @@ def find_last_swing_bos(df, n=SWING_BARS):
 
 
 # ============================================================
-# FVG — dengan volume fields untuk fvg_strong
+# FVG — dengan volume fields untuk fvg
 # ============================================================
 
 def _gap_vol_fields(df, c3_idx):
@@ -378,13 +378,12 @@ def candle_touches_fvg(candle, fvg, stype):
         return candle['high'] >= fvg['bottom'] and not fvg_fully_broken(candle, fvg, stype)
 
 
-def _get_strong_fvgs(df_h1, stype, bos_idx, choch_level=None):
-    """FVG kuat: C3 vol > avg20H, c3_open ada, c1_close ada, CHOCH filter, MAX_GAP_PCT filter."""
+def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
+    """FVG biasa (TANPA syarat volume): C1/C3 fields valid, CHOCH filter, MAX_GAP_PCT filter."""
     gaps = get_internal_gaps(df_h1, stype, bos_idx)
-    # Hanya FVG dengan volume kuat + C1/C3 fields valid
+    # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
     gaps = [g for g in gaps
-            if g.get('c3_vol', 0) > g.get('vol_max10h', 0) > 0
-            and g.get('c3_open', 0) > 0
+            if g.get('c3_open', 0) > 0
             and g.get('c1_close', 0) > 0]
     # Filter FVG yang straddle CHOCH
     if choch_level:
@@ -801,7 +800,7 @@ def test_connection():
 
 
 # ============================================================
-# REPLAY H1 — reconstruct state saat startup (fvg_strong)
+# REPLAY H1 — reconstruct state saat startup (fvg)
 # ============================================================
 
 def replay_h1(coin, df_h1):
@@ -836,7 +835,7 @@ def replay_h1(coin, df_h1):
         sh_above    = [s for s in sh_h1 if s['val'] > swing_val]
         choch_level = sh_above[-1]['val'] if sh_above else None
 
-    gaps = _get_strong_fvgs(df_h1, stype, bos_idx, choch_level)
+    gaps = _get_fvgs(df_h1, stype, bos_idx, choch_level)
     if not gaps:
         return None
 
@@ -853,7 +852,7 @@ def replay_h1(coin, df_h1):
     }
 
     choch_str = f"{choch_level:.6g}" if choch_level else "—"
-    print(f"\n📊 {coin}: BOS {stype} | Swing: {swing_val:.6g} | {len(gaps)} FVG kuat")
+    print(f"\n📊 {coin}: BOS {stype} | Swing: {swing_val:.6g} | {len(gaps)} FVG")
     print(f"   ⛔ CHOCH batal: {choch_str}")
     for gi, g in enumerate(gaps):
         ocl      = g.get('c3_open', 0)
@@ -885,18 +884,18 @@ def reconstruct_state():
 
 
 # ============================================================
-# CORE LOOP — fvg_strong strategy
-# BOS H1 → FVG kuat (C3 vol > avg20H) → OCL touch M5
+# CORE LOOP — fvg strategy
+# BOS H1 → FVG (C3 vol > avg20H) → OCL touch M5
 # → Touch vol filter → Entry market + trailing stop
 # ============================================================
 
 # ============================================================
 # CORE LOOP — SMC inti
-# BOS H1 -> Strong FVG -> Limit entry @ C1.close -> SL C1 invalidation -> Trailing
+# BOS H1 -> FVG -> Limit entry @ C1.close -> SL C1 invalidation -> Trailing
 # ============================================================
 
 def run_bot():
-    print("SMC INTI BOT — BOS H1 -> Strong FVG -> Limit @ C1.close -> Trailing")
+    print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> Trailing")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -966,13 +965,13 @@ def run_bot():
                     if len(bos_rows) > 0:
                         bos_idx = int(bos_rows[0]); pending[coin]['bos_idx'] = bos_idx
                     if bos_idx < len(df_h1_live):
-                        fresh = _get_strong_fvgs(df_h1_live, stype, bos_idx, choch_level)
+                        fresh = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
                         if fresh:
                             pending[coin]['fvg_list'] = fresh
                     if not pending[coin].get('fvg_list'):
                         if setup.get('order_id'):
                             cancel_order(coin, setup['order_id'])
-                        print(f"🗑️ {coin}: Tidak ada FVG kuat tersisa.")
+                        print(f"🗑️ {coin}: Tidak ada FVG tersisa.")
                         del pending[coin]; continue
 
                     # ── WAIT_APPROACH: harga mendekati zona, belum pasang order ──
@@ -1082,7 +1081,7 @@ def run_bot():
                                     setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
                         continue
 
-                # ── SCAN SETUP BARU: BOS H1 -> Strong FVG -> WAIT_APPROACH ──
+                # ── SCAN SETUP BARU: BOS H1 -> FVG -> WAIT_APPROACH ──
                 if not sh_h1 or not sl_h1:
                     continue
                 is_long = False; is_short = False; swing_val = None; bos_idx = None
@@ -1103,9 +1102,9 @@ def run_bot():
                 else:
                     sh_above = [s for s in sh_h1 if s['val'] > swing_val]
                     choch_level = sh_above[-1]['val'] if sh_above else None
-                gaps = _get_strong_fvgs(df_h1_live, stype, bos_idx, choch_level)
+                gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
                 if not gaps:
-                    print(f"   {coin}: BOS {stype} — tidak ada FVG kuat"); continue
+                    print(f"   {coin}: BOS {stype} — tidak ada FVG"); continue
                 existing = pending.get(coin)
                 if existing and existing.get('swing_val') == swing_val and existing.get('type') == stype:
                     continue
