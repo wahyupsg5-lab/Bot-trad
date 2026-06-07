@@ -289,6 +289,28 @@ def find_last_swing_bos(df, n=SWING_BARS):
     return highs, lows
 
 
+def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1):
+    """CHOCH = swing low (Long) / high (Short) yang MELONTARKAN impulse, yaitu swing
+    terakhir SEBELUM puncak/lembah impulse — bukan swing baru yang terbentuk saat pullback.
+    Return (bos_idx, choch_level)."""
+    if swing_val is None or brk_idx is None or not sh_h1 or not sl_h1:
+        return None, None
+    if stype == "Long":
+        peaks = [x for x in sh_h1 if x['idx'] > brk_idx and x['val'] > swing_val]
+        b_idx = (max(peaks, key=lambda x: x['val'])['idx'] if peaks else sh_h1[-1]['idx'])
+        mids = [x for x in sl_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sl_h1 if x['idx'] < b_idx]
+        if not mids:
+            return None, None
+        return mids[-1]['idx'], mids[-1]['val']
+    else:
+        troughs = [x for x in sl_h1 if x['idx'] > brk_idx and x['val'] < swing_val]
+        b_idx = (min(troughs, key=lambda x: x['val'])['idx'] if troughs else sl_h1[-1]['idx'])
+        mids = [x for x in sh_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sh_h1 if x['idx'] < b_idx]
+        if not mids:
+            return None, None
+        return mids[-1]['idx'], mids[-1]['val']
+
+
 # ============================================================
 # FVG — dengan volume fields untuk fvg
 # ============================================================
@@ -840,28 +862,21 @@ def replay_h1(coin, df_h1):
     is_long = False; is_short = False
     swing_val = None; bos_idx = None
 
+    brk_idx = None
     for sh in sh_h1[-3:]:
         if closed_h1['close'] > sh['val']:
-            is_long   = True
-            swing_val = sh['val']
-            bos_idx   = sl_h1[-1]['idx'] if sl_h1 else sh['idx']
+            is_long = True; swing_val = sh['val']; brk_idx = sh['idx']
     for sl in sl_h1[-3:]:
         if closed_h1['close'] < sl['val']:
-            is_short  = True
-            swing_val = sl['val']
-            bos_idx   = sh_h1[-1]['idx'] if sh_h1 else sl['idx']
+            is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
 
     if not (is_long or is_short):
         return None
 
     stype = "Short" if is_short else "Long"
-
-    if stype == "Long":
-        sl_below    = [s for s in sl_h1 if s['val'] < swing_val]
-        choch_level = sl_below[-1]['val'] if sl_below else None
-    else:
-        sh_above    = [s for s in sh_h1 if s['val'] > swing_val]
-        choch_level = sh_above[-1]['val'] if sh_above else None
+    bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+    if bos_idx is None or choch_level is None:
+        return None
 
     gaps = _get_fvgs(df_h1, stype, bos_idx, choch_level)
     if not gaps:
@@ -924,7 +939,7 @@ def reconstruct_state():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v5.4 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v5.5 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
@@ -1121,24 +1136,19 @@ def run_bot():
                 # ── SCAN SETUP BARU: BOS H1 -> FVG -> WAIT_APPROACH ──
                 if not sh_h1 or not sl_h1:
                     continue
-                is_long = False; is_short = False; swing_val = None; bos_idx = None
+                is_long = False; is_short = False; swing_val = None; brk_idx = None
                 for sh in sh_h1[-3:]:
                     if closed_h1['close'] > sh['val']:
-                        is_long = True; swing_val = sh['val']; bos_idx = sl_h1[-1]['idx'] if sl_h1 else sh['idx']
+                        is_long = True; swing_val = sh['val']; brk_idx = sh['idx']
                 for sl in sl_h1[-3:]:
                     if closed_h1['close'] < sl['val']:
-                        is_short = True; swing_val = sl['val']; bos_idx = sh_h1[-1]['idx'] if sh_h1 else sl['idx']
+                        is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
                 if not (is_long or is_short):
                     print(f"   {coin}: tidak ada BOS H1"); continue
-                if swing_val is None or bos_idx is None:
-                    continue
                 stype = "Short" if is_short else "Long"
-                if stype == "Long":
-                    sl_below = [s for s in sl_h1 if s['val'] < swing_val]
-                    choch_level = sl_below[-1]['val'] if sl_below else None
-                else:
-                    sh_above = [s for s in sh_h1 if s['val'] > swing_val]
-                    choch_level = sh_above[-1]['val'] if sh_above else None
+                bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+                if swing_val is None or bos_idx is None or choch_level is None:
+                    print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)"); continue
                 gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
                 if not gaps:
                     print(f"   {coin}: BOS {stype} — tidak ada FVG"); continue
