@@ -79,6 +79,8 @@ SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
 TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
 TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
+USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
+RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
 ENTRY_MODE       = 'fvg_limit'  # limit di zona FVG (satu-satunya jalur)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
@@ -318,17 +320,9 @@ def get_internal_gaps(df, stype, bos_idx, lookback=60):
     for i in range(bos_idx - 1, scan_start, -1):
         gap = None
         if stype == "Long" and df['high'].iloc[i-2] < df['low'].iloc[i]:
-            if not (df['close'].iloc[i-2] > df['open'].iloc[i-2] and
-                    df['close'].iloc[i-1] > df['open'].iloc[i-1] and
-                    df['close'].iloc[i]   > df['open'].iloc[i]):
-                continue
             gap = {"top": df['low'].iloc[i], "bottom": df['high'].iloc[i-2], "zone": "pre"}
             gap.update(_gap_vol_fields(df, i))
         elif stype == "Short" and df['low'].iloc[i-2] > df['high'].iloc[i]:
-            if not (df['close'].iloc[i-2] < df['open'].iloc[i-2] and
-                    df['close'].iloc[i-1] < df['open'].iloc[i-1] and
-                    df['close'].iloc[i]   < df['open'].iloc[i]):
-                continue
             gap = {"top": df['low'].iloc[i-2], "bottom": df['high'].iloc[i], "zone": "pre"}
             gap.update(_gap_vol_fields(df, i))
         if gap:
@@ -345,17 +339,9 @@ def get_internal_gaps(df, stype, bos_idx, lookback=60):
         if i + 1 >= len(df): continue
         gap = None
         if stype == "Long" and df['high'].iloc[i-1] < df['low'].iloc[i+1]:
-            if not (df['close'].iloc[i-1] > df['open'].iloc[i-1] and
-                    df['close'].iloc[i]   > df['open'].iloc[i]   and
-                    df['close'].iloc[i+1] > df['open'].iloc[i+1]):
-                continue
             gap = {"top": df['low'].iloc[i+1], "bottom": df['high'].iloc[i-1], "zone": "post"}
             gap.update(_gap_vol_fields(df, i + 1))
         elif stype == "Short" and df['low'].iloc[i-1] > df['high'].iloc[i+1]:
-            if not (df['close'].iloc[i-1] < df['open'].iloc[i-1] and
-                    df['close'].iloc[i]   < df['open'].iloc[i]   and
-                    df['close'].iloc[i+1] < df['open'].iloc[i+1]):
-                continue
             gap = {"top": df['low'].iloc[i-1], "bottom": df['high'].iloc[i+1], "zone": "post"}
             gap.update(_gap_vol_fields(df, i + 1))
         if gap:
@@ -602,16 +588,19 @@ def place_limit_order(symbol, side, entry_p, sl_p):
               f"Trail:{trail_r} ActiveP:{active_r} Qty:{qty} Entry:{entry_r} SL:{sl_r} "
               f"Lev:{lev_int}x Margin:~${required_margin:.2f}")
 
-        res = session.place_order(
-            category=CATEGORY, symbol=symbol, side=side,
-            orderType="Limit", qty=str(qty),
-            price=str(entry_r),
-            stopLoss=str(sl_r),
-            trailingStop=str(trail_r),
-            activePrice=str(active_r),
-            positionIdx=0,
-            timeInForce="GTC"
-        )
+        if USE_TP:
+            tp_r = round_price(entry_p + RR_TP * dist if side == "Buy" else entry_p - RR_TP * dist, info['tick_size'])
+            res = session.place_order(
+                category=CATEGORY, symbol=symbol, side=side,
+                orderType="Limit", qty=str(qty), price=str(entry_r),
+                stopLoss=str(sl_r), takeProfit=str(tp_r),
+                positionIdx=0, timeInForce="GTC")
+        else:
+            res = session.place_order(
+                category=CATEGORY, symbol=symbol, side=side,
+                orderType="Limit", qty=str(qty), price=str(entry_r),
+                stopLoss=str(sl_r), trailingStop=str(trail_r), activePrice=str(active_r),
+                positionIdx=0, timeInForce="GTC")
         if res['retCode'] == 0:
             return res['result']['orderId']
         print(f"⚠️ {symbol}: Limit order ditolak → {res.get('retMsg','')} (code:{res['retCode']})")
@@ -770,7 +759,7 @@ def check_trailing_sl(coin):
 
         # Pasang trailing stop via set_trading_stop saat pertama posisi terdeteksi
         # activePrice = entry + TRAIL_ACT_R×dist → trail aktif setelah +1.5R profit (sinkron backtest)
-        if TRAIL_STOP > 0 and dist > 0 and not p.get('trail_set', False):
+        if (not USE_TP) and TRAIL_STOP > 0 and dist > 0 and not p.get('trail_set', False):
             trail_dist = p.get('trail_dist', TRAIL_STOP * dist)
             info       = get_instrument_info(coin)
             tick       = info.get('tick_size', 0.0001)
@@ -796,7 +785,7 @@ def check_trailing_sl(coin):
                 except Exception as e:
                     print(f"⚠️ {coin}: set_trading_stop error: {e}")
 
-        if dist > 0 and not p.get('trail_engaged', False):
+        if (not USE_TP) and dist > 0 and not p.get('trail_engaged', False):
             if side == "Buy"  and curr_price >= entry + TRAIL_ACT_R * dist:
                 active_positions[coin]['trail_engaged'] = True
                 print(f"✅ {coin}: Trail engaged @ {curr_price:.6f} (+{TRAIL_ACT_R}R)")
@@ -920,7 +909,7 @@ def reconstruct_state():
 # ============================================================
 
 def run_bot():
-    print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> Trailing")
+    print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -1066,12 +1055,18 @@ def run_bot():
                             trail_set_ok = False
                             for _attempt in range(3):
                                 try:
-                                    res_ts = session.set_trading_stop(
-                                        category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
-                                        trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=0)
+                                    if USE_TP:
+                                        tp_r = round_price(actual_entry + RR_TP * actual_dist if side_order == "Buy" else actual_entry - RR_TP * actual_dist, tick)
+                                        res_ts = session.set_trading_stop(
+                                            category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
+                                            takeProfit=str(tp_r), positionIdx=0)
+                                    else:
+                                        res_ts = session.set_trading_stop(
+                                            category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
+                                            trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=0)
                                     if res_ts.get('retCode', -1) == 0:
                                         trail_set_ok = True
-                                        print(f"🛡️  {coin}: SL={sl_r} Trail={trail_r} active={active_p} (+{TRAIL_ACT_R}R)")
+                                        print(f"🛡️  {coin}: SL={sl_r} " + (f"TP={tp_r} (1:{RR_TP})" if USE_TP else f"Trail={trail_r} act={active_p}"))
                                         break
                                     else:
                                         print(f"⚠️ {coin}: set_trading_stop gagal: {res_ts.get('retMsg','')}")
