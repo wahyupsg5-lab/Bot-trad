@@ -939,7 +939,7 @@ def reconstruct_state():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v5.5 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v5.6 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
@@ -1151,7 +1151,20 @@ def run_bot():
                     print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)"); continue
                 gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
                 if not gaps:
-                    print(f"   {coin}: BOS {stype} — tidak ada FVG"); continue
+                    raw = get_internal_gaps(df_h1_live, stype, bos_idx)
+                    if stype == "Long":
+                        Bp = float(df_h1_live['high'].iloc[bos_idx:].max()); rng = Bp - choch_level
+                        retr = [(Bp - float(g.get('c1_close', 0))) / rng * 100 for g in raw] if rng > 0 else []
+                        z618 = Bp - ENTRY_ZONE_LO * rng
+                    else:
+                        Bp = float(df_h1_live['low'].iloc[bos_idx:].min()); rng = choch_level - Bp
+                        retr = [(float(g.get('c1_close', 0)) - Bp) / rng * 100 for g in raw] if rng > 0 else []
+                        z618 = Bp + ENTRY_ZONE_LO * rng
+                    rs = ",".join(f"{r:.0f}%" for r in retr[:6]) if retr else "-"
+                    print(f"   {coin}: BOS {stype} tdk ada FVG di zona | break={swing_val:.6g} "
+                          f"choch={choch_level:.6g} puncak={Bp:.6g} | rawFVG={len(raw)} "
+                          f"retraceC1=[{rs}] (butuh>={ENTRY_ZONE_LO*100:.1f}%, level={z618:.6g})")
+                    continue
                 existing = pending.get(coin)
                 if existing and existing.get('swing_val') == swing_val and existing.get('type') == stype:
                     continue
@@ -1191,8 +1204,10 @@ def run_bot():
                     if used_ocl > 0 and abs(c1_c - used_ocl) / c1_c < 0.001:
                         continue   # zona sama sudah ditrade — skip (tanpa flip arah)
                 choch_str = f"{choch_level:.6g}" if choch_level else "—"
-                print(f"\n📊 {coin} | BOS {stype} | OCL:{c1_c:.6f} Entry:{entry_adj:.6f} "
-                      f"SL:{sl_entry:.6f} dist:{dist/c1_c*100:.3f}% Gap:{gap_s/c1_c*100:.3f}% CHOCH:{choch_str}")
+                _Bp = float(df_h1_live['high'].iloc[bos_idx:].max()) if stype == "Long" else float(df_h1_live['low'].iloc[bos_idx:].min())
+                print(f"\n📊 {coin} | BOS {stype} | break:{swing_val:.6g} puncak:{_Bp:.6g} CHOCH:{choch_str} | "
+                      f"OCL:{c1_c:.6f} Entry:{entry_adj:.6f} SL:{sl_entry:.6f} "
+                      f"dist:{dist/c1_c*100:.3f}% Gap:{gap_s/c1_c*100:.3f}%")
                 pending[coin] = {
                     'type': stype, 'phase': 'WAIT_APPROACH', 'entry': entry_adj, 'sl': sl_entry,
                     'dist': dist, 'orig_ocl': c1_c, 'fvg_list': gaps, 'bos_ts': bos_ts,
