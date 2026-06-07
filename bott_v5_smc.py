@@ -939,7 +939,7 @@ def reconstruct_state():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v5.6 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v5.7 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
@@ -1154,16 +1154,35 @@ def run_bot():
                     raw = get_internal_gaps(df_h1_live, stype, bos_idx)
                     if stype == "Long":
                         Bp = float(df_h1_live['high'].iloc[bos_idx:].max()); rng = Bp - choch_level
-                        retr = [(Bp - float(g.get('c1_close', 0))) / rng * 100 for g in raw] if rng > 0 else []
                         z618 = Bp - ENTRY_ZONE_LO * rng
                     else:
                         Bp = float(df_h1_live['low'].iloc[bos_idx:].min()); rng = choch_level - Bp
-                        retr = [(float(g.get('c1_close', 0)) - Bp) / rng * 100 for g in raw] if rng > 0 else []
                         z618 = Bp + ENTRY_ZONE_LO * rng
-                    rs = ",".join(f"{r:.0f}%" for r in retr[:6]) if retr else "-"
+                    tags = []
+                    for g in raw:
+                        c1c = float(g.get('c1_close', 0))
+                        r = ((Bp - c1c) if stype == "Long" else (c1c - Bp)) / rng * 100 if rng > 0 else 0
+                        if stype == "Long" and g['bottom'] < choch_level:
+                            why = "choch"
+                        elif stype == "Short" and g['top'] > choch_level:
+                            why = "choch"
+                        else:
+                            if stype == "Long":
+                                lo = Bp - ENTRY_ZONE_HI * rng; hi = Bp - ENTRY_ZONE_LO * rng
+                            else:
+                                lo = Bp + ENTRY_ZONE_LO * rng; hi = Bp + ENTRY_ZONE_HI * rng
+                            if not (lo <= c1c <= hi):
+                                why = "zona"
+                            else:
+                                gs = g['top'] - g['bottom']; ocl = float(g.get('c3_open', 0))
+                                if ocl > 0 and MAX_GAP_PCT > 0 and gs / ocl > MAX_GAP_PCT:
+                                    why = f"gap{gs / ocl * 100:.2f}%"
+                                else:
+                                    why = "OK"
+                        tags.append(f"{r:.0f}%:{why}")
                     print(f"   {coin}: BOS {stype} tdk ada FVG di zona | break={swing_val:.6g} "
                           f"choch={choch_level:.6g} puncak={Bp:.6g} | rawFVG={len(raw)} "
-                          f"retraceC1=[{rs}] (butuh>={ENTRY_ZONE_LO*100:.1f}%, level={z618:.6g})")
+                          f"[{', '.join(tags)}] (zona>={ENTRY_ZONE_LO*100:.1f}%@{z618:.6g}, maxgap={MAX_GAP_PCT*100:.2f}%)")
                     continue
                 existing = pending.get(coin)
                 if existing and existing.get('swing_val') == swing_val and existing.get('type') == stype:
