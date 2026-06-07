@@ -924,6 +924,9 @@ def reconstruct_state():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
+    print(f"CONFIG v5.4 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+          f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
+          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
