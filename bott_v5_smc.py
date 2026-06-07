@@ -81,6 +81,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
+MIN_ORDER_USD    = 5.0    # minimum order value Bybit
+ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
 ENTRY_MODE       = 'fvg_limit'  # limit di zona FVG (satu-satunya jalur)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
@@ -552,10 +554,22 @@ def place_limit_order(symbol, side, entry_p, sl_p):
             return None
 
         order_value = qty * entry_p
-        if order_value < 5.0:
-            print(f"⚠️ {symbol}: Order value ~${order_value:.2f} < $5 minimum Bybit, skip "
-                  f"(balance ${balance:.2f}, risk ${risk_usd:.2f}, dist {dist:.6f}).")
-            return None
+        if order_value < MIN_ORDER_USD:
+            if order_value >= ORDER_BUMP_FLOOR:
+                # order sudah dekat $5 -> naikkan qty agar >= $5 (SL tetap, over-risk <=1.25x)
+                old_ov = order_value
+                qty = round_qty(MIN_ORDER_USD / entry_p, info['qty_step'])
+                if qty * entry_p < MIN_ORDER_USD:
+                    qty = round_qty(qty + info['qty_step'], info['qty_step'])
+                order_value = qty * entry_p
+                new_risk = qty * dist
+                print(f"⬆️ {symbol}: order ${old_ov:.2f}->${order_value:.2f} "
+                      f"(risk ${new_risk:.2f} ~ {new_risk/risk_usd:.2f}x target).")
+            else:
+                print(f"⚠️ {symbol}: Order ~${order_value:.2f} < ${ORDER_BUMP_FLOOR:.0f} "
+                      f"(terlalu jauh dari ${MIN_ORDER_USD:.0f}), skip "
+                      f"(balance ${balance:.2f}, risk ${risk_usd:.2f}, dist {dist:.6f}).")
+                return None
 
         entry_r  = round_price(entry_p,                     info['tick_size'])
         sl_r     = round_price(sl_p,                        info['tick_size'])
