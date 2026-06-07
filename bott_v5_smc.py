@@ -95,6 +95,7 @@ REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.10   # cap jarak entry->SL maksimal 10% range BOS (0 = nonaktif; floor Bybit tetap menang)
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
+REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
 
@@ -328,7 +329,7 @@ def _gap_vol_fields(df, c3_idx):
     c1_high  = float(df['high'].iloc[c1_idx])  if c1_idx >= 0 else 0.0
     base = {'c2_close': c2_close, 'c3_open': c3_open,
             'c1_open': c1_open, 'c1_close': c1_close,
-            'c1_low': c1_low,   'c1_high': c1_high}
+            'c1_low': c1_low,   'c1_high': c1_high, 'c3_idx': c3_idx}
     if 'vol' not in df.columns:
         return {**base, 'c3_vol': 0.0, 'vol_max10h': 0.0}
     c3_vol    = float(df['vol'].iloc[c3_idx])
@@ -396,7 +397,7 @@ def candle_touches_fvg(candle, fvg, stype):
 
 
 def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
-    """FVG biasa (TANPA syarat volume): C1/C3 fields valid, CHOCH filter, MAX_GAP_PCT filter."""
+    """FVG biasa (TANPA syarat volume): C1/C3 fields valid, CHOCH filter, MAX_GAP_PCT filter, fresh-C1."""
     gaps = get_internal_gaps(df_h1, stype, bos_idx)
     # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
     gaps = [g for g in gaps
@@ -434,8 +435,27 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
         ocl      = float(g.get('c3_open', g['bottom'] if stype == 'Short' else g['top']))
         if ocl > 0 and MAX_GAP_PCT > 0 and gap_size / ocl > MAX_GAP_PCT:
             continue
+        # Fresh-C1: tolak kalau C1.close sudah disentuh candle SETELAH C3
+        if REQUIRE_FRESH_C1 and not c1_is_fresh(df_h1, g, stype):
+            continue
         result.append(g)
     return result
+
+
+def c1_is_fresh(df, gap, stype):
+    """C1 fresh = belum ada candle SETELAH C3 (s/d candle closed terakhir) yang menyentuh C1.close.
+    Long: low <= c1_close menyentuh. Short: high >= c1_close menyentuh."""
+    c3i = gap.get('c3_idx')
+    c1c = float(gap.get('c1_close', 0))
+    if c3i is None or c1c <= 0:
+        return True
+    n = len(df)
+    for k in range(int(c3i) + 1, n - 1):   # candle setelah C3 s/d candle CLOSED terakhir (exclude candle berjalan)
+        if stype == "Long" and float(df['low'].iloc[k]) <= c1c:
+            return False
+        if stype == "Short" and float(df['high'].iloc[k]) >= c1c:
+            return False
+    return True
 
 
 # ============================================================
@@ -938,22 +958,30 @@ def reconstruct_state():
 # BOS H1 -> FVG -> Limit entry @ C1.close -> SL C1 invalidation -> Trailing
 # ============================================================
 
-def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True):
+def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
     """Deteksi BOS H1 terbaru -> FVG -> bangun setup WAIT_APPROACH.
+    force_dir='Long'/'Short' => deteksi HANYA arah itu (untuk monitoring dua arah).
     Return (setup_dict, logline) atau (None, None). TIDAK menyentuh pending."""
     if not sh_h1 or not sl_h1:
         return None, None
     is_long = False; is_short = False; swing_val = None; brk_idx = None
-    for sh in sh_h1[-3:]:
-        if closed_h1['close'] > sh['val']:
-            is_long = True; swing_val = sh['val']; brk_idx = sh['idx']
-    for sl in sl_h1[-3:]:
-        if closed_h1['close'] < sl['val']:
-            is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
+    if force_dir in (None, "Long"):
+        for sh in sh_h1[-3:]:
+            if closed_h1['close'] > sh['val']:
+                is_long = True; swing_val = sh['val']; brk_idx = sh['idx']
+    if force_dir in (None, "Short"):
+        for sl in sl_h1[-3:]:
+            if closed_h1['close'] < sl['val']:
+                is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
     if not (is_long or is_short):
         if verbose: print(f"   {coin}: tidak ada BOS H1")
         return None, None
-    stype = "Short" if is_short else "Long"
+    if force_dir == "Long":
+        stype = "Long"
+    elif force_dir == "Short":
+        stype = "Short"
+    else:
+        stype = "Short" if is_short else "Long"
     bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
     if swing_val is None or bos_idx is None or choch_level is None:
         if verbose: print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)")
@@ -1026,11 +1054,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
             dist = min_d; sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
         else:
             return None, None
-    done = done_setups.get(coin)
-    if done and done.get('swing_val') == swing_val and done.get('stype') == stype:
-        used_ocl = done.get('used_ocl', 0)
-        if used_ocl > 0 and abs(c1_c - used_ocl) / c1_c < 0.001:
-            return None, None
+    # (guard done_setups dihapus — anti-retrade kini lewat REQUIRE_FRESH_C1)
     choch_str = f"{choch_level:.6g}" if choch_level else "—"
     _slr = (dist / bos_rng * 100) if bos_rng > 0 else 0
     logline = (f"\n📊 {coin} | BOS {stype} | break:{swing_val:.6g} puncak:{_B:.6g} CHOCH:{choch_str} | "
@@ -1044,13 +1068,146 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     return setup, logline
 
 
+def _count_slots():
+    """Jumlah WAIT_FILL di semua coin & arah (untuk plafon MAX_CONCURRENT)."""
+    nf = 0
+    for d in pending.values():
+        for s in d.values():
+            if s.get('phase') == 'WAIT_FILL':
+                nf += 1
+    return nf
+
+
+def process_setup(coin, setup, df_h1_live, curr_h1):
+    """Proses 1 setup (1 arah). Mutasi setup in-place.
+    Return: 'remove' | 'keep' (WAIT_APPROACH) | 'lock' (WAIT_FILL) | 'fill' (posisi sudah dibuka)."""
+    stype = setup['type']; choch_level = setup.get('choch_level'); bos_idx = setup.get('bos_idx', 0)
+    # CHOCH invalidation
+    if choch_level:
+        invalid = (stype == "Long"  and curr_h1['close'] < choch_level) or \
+                  (stype == "Short" and curr_h1['close'] > choch_level)
+        if invalid:
+            if setup.get('order_id'): cancel_order(coin, setup['order_id'])
+            print(f"🔄 {coin} {stype}: CHOCH {choch_level:.6f} ditembus. Setup batal.")
+            return 'remove'
+    # refresh FVG dari bos_idx (re-locate via bos_ts)
+    bos_ts_val = setup.get('bos_ts', 0)
+    bos_rows   = df_h1_live.index[df_h1_live['ts'] == bos_ts_val]
+    if len(bos_rows) > 0:
+        bos_idx = int(bos_rows[0]); setup['bos_idx'] = bos_idx
+    if bos_idx < len(df_h1_live):
+        fresh = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
+        if fresh: setup['fvg_list'] = fresh
+    if not setup.get('fvg_list'):
+        if setup.get('order_id'): cancel_order(coin, setup['order_id'])
+        print(f"🗑️ {coin} {stype}: Tidak ada FVG tersisa / tidak fresh.")
+        return 'remove'
+    curr_price = float(curr_h1['close'])
+
+    # ── WAIT_APPROACH ──
+    if setup['phase'] == 'WAIT_APPROACH':
+        entry = setup['entry']; dist = setup['dist']; thr = APPROACH_R * dist
+        approaching   = (stype == 'Long'  and curr_price <= entry + thr) or \
+                        (stype == 'Short' and curr_price >= entry - thr)
+        approach_thr  = entry + thr if stype == 'Long' else entry - thr
+        status_str = "✅ DALAM RANGE" if approaching else "⏳ menunggu"
+        print(f"👁️  {coin} {stype} | now:{curr_price:.6f} entry:{entry:.6f} thr:{approach_thr:.6f} | {status_str}")
+        if approaching:
+            direction_valid = (stype == 'Long'  and curr_price > entry) or \
+                              (stype == 'Short' and curr_price < entry)
+            if not direction_valid:
+                print(f"⛔ {coin} {stype}: harga {curr_price:.6f} sudah lewat zona {entry:.6f} — batal.")
+                return 'remove'
+            active_count = len(active_positions) + _count_slots()
+            if active_count >= MAX_CONCURRENT:
+                print(f"⏸️  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
+                return 'keep'
+            side_order = "Buy" if stype == "Long" else "Sell"
+            order_id   = place_limit_order(coin, side_order, entry, setup['sl'])
+            if order_id:
+                setup['phase'] = 'WAIT_FILL'; setup['order_id'] = order_id
+                print(f"📍 {coin} {stype}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R)")
+                return 'lock'
+            return 'remove'
+        return 'keep'
+
+    # ── WAIT_FILL ──
+    if setup['phase'] == 'WAIT_FILL':
+        entry_w = setup['entry']; dist_w = setup['dist']; thr_w = APPROACH_R * dist_w
+        price_away = (stype == 'Long'  and curr_price > entry_w + thr_w) or \
+                     (stype == 'Short' and curr_price < entry_w - thr_w)
+        if price_away:
+            if setup.get('order_id'): cancel_order(coin, setup['order_id'])
+            setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
+            print(f"📤 {coin} {stype}: Limit dibatalkan (harga mundur > {APPROACH_R}R). Menunggu lagi.")
+            return 'keep'
+        pos = get_open_position(coin)
+        if pos:
+            entry_p = setup['entry']; sl_p = setup['sl']
+            side_order = "Buy" if stype == "Long" else "Sell"
+            actual_entry = float(pos.get('avgPrice', entry_p))
+            actual_dist  = abs(actual_entry - sl_p)
+            min_dist = actual_entry * 0.002
+            if actual_dist < min_dist:
+                actual_dist = min_dist
+                sl_p = actual_entry - actual_dist if side_order == "Buy" else actual_entry + actual_dist
+                print(f"⚠️ {coin}: SL diperlebar ke {sl_p:.6f}")
+            trail_d = TRAIL_STOP * actual_dist
+            info = get_instrument_info(coin); tick = info.get('tick_size', 0.0001)
+            sl_r = round_price(sl_p, tick); trail_r = round_price(trail_d, tick)
+            active_p = round_price(
+                actual_entry + TRAIL_ACT_R * actual_dist if side_order == "Buy"
+                else actual_entry - TRAIL_ACT_R * actual_dist, tick)
+            trail_set_ok = False
+            for _attempt in range(3):
+                try:
+                    if USE_TP:
+                        tp_r = round_price(actual_entry + RR_TP * actual_dist if side_order == "Buy" else actual_entry - RR_TP * actual_dist, tick)
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), takeProfit=str(tp_r), positionIdx=0)
+                    else:
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=0)
+                    if res_ts.get('retCode', -1) == 0:
+                        trail_set_ok = True
+                        print(f"🛡️  {coin}: SL={sl_r} " + (f"TP={tp_r} (1:{RR_TP})" if USE_TP else f"Trail={trail_r} act={active_p}"))
+                        break
+                    else:
+                        print(f"⚠️ {coin}: set_trading_stop gagal: {res_ts.get('retMsg','')}"); time.sleep(2)
+                except Exception as e:
+                    print(f"⚠️ {coin}: set_trading_stop error: {e}"); time.sleep(2)
+            if not trail_set_ok:
+                print(f"⚠️ {coin}: Trail gagal — retry M5 berikutnya")
+            active_positions[coin] = {
+                'side': side_order, 'entry': actual_entry, 'sl': sl_p, 'dist': actual_dist,
+                'trail_dist': trail_d, 'trail_engaged': False, 'trail_set': trail_set_ok,
+                'last_price': actual_entry, 'entry_time': time.time(),
+                'peak': actual_entry, 'peak_time': time.time(),
+                'swing_val': setup.get('swing_val'), 'bos_type': stype, 'rev_count': 0,
+                'orig_ocl': setup.get('orig_ocl', setup.get('entry')),
+            }
+            done_setups[coin] = {'swing_val': setup.get('swing_val'), 'stype': stype, 'used_ocl': setup.get('entry')}
+            print(f"✅ {coin}: Limit filled! Entry:{actual_entry:.6f} SL:{sl_p:.6f}")
+            return 'fill'
+        else:
+            oid = setup.get('order_id')
+            if oid and not _order_exists(coin, oid):
+                if _order_was_filled(coin, oid):
+                    print(f"📭 {coin} {stype}: Limit filled lalu tutup (SL) — selesai.")
+                    return 'remove'
+                else:
+                    print(f"📤 {coin} {stype}: Limit hilang (cancel) — kembali menunggu.")
+                    setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
+                    return 'keep'
+        return 'lock'
+    return 'keep'
+
+
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v5.10 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.0 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
-          f"redeteksi:WAIT_APPROACH | "
+          f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
@@ -1072,16 +1229,17 @@ def run_bot():
                 print(f"⚠️ Trailing SL {coin}: {e}")
 
         n_active   = len(active_positions)
-        n_waitfill = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_FILL')
-        n_approach = sum(1 for s in pending.values() if s.get('phase') == 'WAIT_APPROACH')
+        n_waitfill = _count_slots()
+        n_approach = sum(1 for d in pending.values() for s in d.values() if s.get('phase') == 'WAIT_APPROACH')
         slots_used = n_active + n_waitfill
         print(f"\n{'='*55}")
         print(f"📊 SLOT: {slots_used}/{MAX_CONCURRENT} terpakai (posisi:{n_active} | limit:{n_waitfill} | watch:{n_approach})")
         if active_positions:
             print(f"   Aktif: {', '.join(active_positions.keys())}")
         if pending:
-            for c, st in pending.items():
-                print(f"   {c}: {st.get('phase','?')} {st.get('type','?')} @ {st.get('entry',0):.6g}")
+            for c, dirs in pending.items():
+                for d, st in dirs.items():
+                    print(f"   {c} [{d}]: {st.get('phase','?')} @ {st.get('entry',0):.6g}")
         print(f"{'='*55}")
 
         for coin in SYMBOLS:
@@ -1096,168 +1254,55 @@ def run_bot():
                 closed_h1 = df_h1_live.iloc[-2]
                 curr_h1   = df_h1_live.iloc[-1]
 
-                # ── PROSES SETUP PENDING ─────────────────────────────
+                # ── PROSES SETUP PENDING (per arah) ──────────────────
                 if coin in pending:
-                    setup       = pending[coin]
-                    stype       = setup['type']
-                    bos_idx     = setup.get('bos_idx', 0)
-                    swing_val   = setup.get('swing_val')
-                    choch_level = setup.get('choch_level')
-
-                    # CHOCH invalidation — struktur batal
-                    if choch_level:
-                        invalid = (stype == "Long"  and curr_h1['close'] < choch_level) or \
-                                  (stype == "Short" and curr_h1['close'] > choch_level)
-                        if invalid:
-                            if setup.get('order_id'):
-                                cancel_order(coin, setup['order_id'])
-                            done_setups.pop(coin, None)
-                            print(f"🔄 {coin}: CHOCH {choch_level:.6f} ditembus. Setup batal.")
-                            del pending[coin]; continue
-
-                    # refresh FVG list dari bos_idx
-                    bos_ts_val = setup.get('bos_ts', 0)
-                    bos_rows   = df_h1_live.index[df_h1_live['ts'] == bos_ts_val]
-                    if len(bos_rows) > 0:
-                        bos_idx = int(bos_rows[0]); pending[coin]['bos_idx'] = bos_idx
-                    if bos_idx < len(df_h1_live):
-                        fresh = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
-                        if fresh:
-                            pending[coin]['fvg_list'] = fresh
-                    if not pending[coin].get('fvg_list'):
-                        if setup.get('order_id'):
-                            cancel_order(coin, setup['order_id'])
-                        print(f"🗑️ {coin}: Tidak ada FVG tersisa.")
-                        del pending[coin]; continue
-
-                    # ── WAIT_APPROACH: harga mendekati zona, belum pasang order ──
-                    if setup['phase'] == 'WAIT_APPROACH':
-                        # Re-deteksi BOS terbaru; kalau struktur beda -> GANTI setup (khusus WAIT_APPROACH)
-                        cand, cand_log = build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=False)
-                        if cand and (cand['swing_val'] != setup.get('swing_val') or cand['type'] != setup.get('type')):
-                            print(f"🔁 {coin}: BOS lebih baru — ganti setup (lama break {setup.get('swing_val')} {setup.get('type')} "
-                                  f"→ baru break {cand['swing_val']:.6g} {cand['type']})")
-                            print(cand_log)
-                            pending[coin] = cand
-                            setup = cand
-                            stype = setup['type']; bos_idx = setup['bos_idx']
-                            swing_val = setup['swing_val']; choch_level = setup['choch_level']
-                        curr_price = float(curr_h1['close'])
-                        entry = setup['entry']; dist = setup['dist']
-                        thr   = APPROACH_R * dist
-                        approaching = (stype == 'Long'  and curr_price <= entry + thr) or \
-                                      (stype == 'Short' and curr_price >= entry - thr)
-                        if stype == 'Long':
-                            approach_thr = entry + thr; gap_to_thr = curr_price - approach_thr
-                        else:
-                            approach_thr = entry - thr; gap_to_thr = approach_thr - curr_price
-                        gap_pct = gap_to_thr / entry * 100
-                        status_str = "✅ DALAM RANGE" if approaching else f"⏳ kurang {abs(gap_pct):.2f}% ke threshold"
-                        print(f"👁️  {coin} WAIT | {stype} | now:{curr_price:.6f} entry:{entry:.6f} thr:{approach_thr:.6f} | {status_str}")
-                        if approaching:
-                            direction_valid = (stype == 'Long'  and curr_price > entry) or \
-                                              (stype == 'Short' and curr_price < entry)
-                            if not direction_valid:
-                                print(f"⛔ {coin}: Harga {curr_price:.6f} sudah melewati zona {entry:.6f} ({stype}) — batal.")
-                                done_setups.pop(coin, None)
-                                del pending[coin]; continue
-                            active_count = len(active_positions) + sum(
-                                1 for st in pending.values() if st.get('phase') == 'WAIT_FILL')
-                            if active_count >= MAX_CONCURRENT:
-                                print(f"⏸️  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
-                            else:
-                                side_order = "Buy" if stype == "Long" else "Sell"
-                                order_id   = place_limit_order(coin, side_order, entry, setup['sl'])
-                                if order_id:
-                                    setup['phase'] = 'WAIT_FILL'; setup['order_id'] = order_id
-                                    print(f"📍 {coin}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R)")
-                                else:
-                                    del pending[coin]
+                    dirs = pending[coin]
+                    filled = False
+                    for d in list(dirs.keys()):
+                        action = process_setup(coin, dirs[d], df_h1_live, curr_h1)
+                        if action == 'remove':
+                            if dirs[d].get('order_id'):
+                                cancel_order(coin, dirs[d]['order_id'])
+                            del dirs[d]
+                        elif action == 'fill':
+                            filled = True
+                            for d2 in list(dirs.keys()):
+                                if d2 != d and dirs[d2].get('order_id'):
+                                    cancel_order(coin, dirs[d2]['order_id'])
+                                    print(f"🚫 {coin} {d2}: order lawan dibatalkan (arah {d} terisi).")
+                            break
+                    if filled:
+                        pending.pop(coin, None)
                         continue
-
-                    # ── WAIT_FILL: limit terpasang, nunggu fill ──────────
-                    if setup['phase'] == 'WAIT_FILL':
-                        curr_price = float(curr_h1['close'])
-                        entry_w = setup['entry']; dist_w = setup['dist']; thr_w = APPROACH_R * dist_w
-                        price_away = (stype == 'Long'  and curr_price > entry_w + thr_w) or \
-                                     (stype == 'Short' and curr_price < entry_w - thr_w)
-                        if price_away:
-                            if setup.get('order_id'):
-                                cancel_order(coin, setup['order_id'])
-                            setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
-                            print(f"📤 {coin}: Limit dibatalkan (harga mundur > {APPROACH_R}R). Kembali menunggu.")
+                    # Re-deteksi DUA ARAH: tambah/ganti di arah yg masih WAIT_APPROACH atau belum ada
+                    for d in ('Long', 'Short'):
+                        cur = dirs.get(d)
+                        if cur is not None and cur.get('phase') == 'WAIT_FILL':
+                            continue   # arah terkunci (limit terpasang)
+                        cand, cand_log = build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=False, force_dir=d)
+                        if not cand:
                             continue
-                        pos = get_open_position(coin)
-                        if pos:
-                            entry_p = setup['entry']; sl_p = setup['sl']
-                            side_order = "Buy" if stype == "Long" else "Sell"
-                            actual_entry = float(pos.get('avgPrice', entry_p))
-                            actual_dist = abs(actual_entry - sl_p)
-                            min_dist = actual_entry * 0.002
-                            if actual_dist < min_dist:
-                                actual_dist = min_dist
-                                sl_p = actual_entry - actual_dist if side_order == "Buy" else actual_entry + actual_dist
-                                print(f"⚠️ {coin}: SL diperlebar ke {sl_p:.6f}")
-                            trail_d = TRAIL_STOP * actual_dist
-                            info = get_instrument_info(coin); tick = info.get('tick_size', 0.0001)
-                            sl_r = round_price(sl_p, tick); trail_r = round_price(trail_d, tick)
-                            active_p = round_price(
-                                actual_entry + TRAIL_ACT_R * actual_dist if side_order == "Buy"
-                                else actual_entry - TRAIL_ACT_R * actual_dist, tick)
-                            trail_set_ok = False
-                            for _attempt in range(3):
-                                try:
-                                    if USE_TP:
-                                        tp_r = round_price(actual_entry + RR_TP * actual_dist if side_order == "Buy" else actual_entry - RR_TP * actual_dist, tick)
-                                        res_ts = session.set_trading_stop(
-                                            category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
-                                            takeProfit=str(tp_r), positionIdx=0)
-                                    else:
-                                        res_ts = session.set_trading_stop(
-                                            category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
-                                            trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=0)
-                                    if res_ts.get('retCode', -1) == 0:
-                                        trail_set_ok = True
-                                        print(f"🛡️  {coin}: SL={sl_r} " + (f"TP={tp_r} (1:{RR_TP})" if USE_TP else f"Trail={trail_r} act={active_p}"))
-                                        break
-                                    else:
-                                        print(f"⚠️ {coin}: set_trading_stop gagal: {res_ts.get('retMsg','')}")
-                                        time.sleep(2)
-                                except Exception as e:
-                                    print(f"⚠️ {coin}: set_trading_stop error: {e}")
-                                    time.sleep(2)
-                            if not trail_set_ok:
-                                print(f"⚠️ {coin}: Trail gagal — retry M5 berikutnya")
-                            active_positions[coin] = {
-                                'side': side_order, 'entry': actual_entry, 'sl': sl_p, 'dist': actual_dist,
-                                'trail_dist': trail_d, 'trail_engaged': False, 'trail_set': trail_set_ok,
-                                'last_price': actual_entry, 'entry_time': time.time(),
-                                'peak': actual_entry, 'peak_time': time.time(),
-                                'swing_val': setup.get('swing_val'), 'bos_type': stype, 'rev_count': 0,
-                                'orig_ocl': setup.get('orig_ocl', setup.get('entry')),
-                            }
-                            done_setups[coin] = {'swing_val': setup.get('swing_val'), 'stype': stype,
-                                                 'used_ocl': setup.get('entry')}
-                            del pending[coin]
-                            print(f"✅ {coin}: Limit filled! Entry:{actual_entry:.6f} SL:{sl_p:.6f}")
-                        else:
-                            oid = setup.get('order_id')
-                            if oid and not _order_exists(coin, oid):
-                                if _order_was_filled(coin, oid):
-                                    print(f"📭 {coin}: Limit filled lalu tutup (SL) — selesai.")
-                                    done_setups[coin] = {'swing_val': setup.get('swing_val'),
-                                                         'stype': stype, 'used_ocl': setup.get('entry')}
-                                    del pending[coin]
-                                else:
-                                    print(f"📤 {coin}: Limit hilang (cancel) — kembali menunggu.")
-                                    setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
-                        continue
+                        if cur is None:
+                            print(f"➕ {coin} {d}: BOS {d} terdeteksi — tambah pantauan")
+                            print(cand_log); dirs[d] = cand
+                        elif cand['swing_val'] != cur.get('swing_val'):
+                            print(f"🔁 {coin} {d}: BOS lebih baru — ganti (break {cur.get('swing_val')} → {cand['swing_val']:.6g})")
+                            print(cand_log); dirs[d] = cand
+                    if not dirs:
+                        pending.pop(coin, None)
+                    continue
 
-                # ── SCAN SETUP BARU: BOS H1 -> FVG -> WAIT_APPROACH ──
-                setup_new, logline = build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True)
-                if setup_new:
-                    print(logline)
-                    pending[coin] = setup_new
+                # ── SCAN SETUP BARU: deteksi DUA ARAH sekaligus ──
+                dirs_new = {}
+                for d in ('Long', 'Short'):
+                    cand, cand_log = build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=False, force_dir=d)
+                    if cand:
+                        print(cand_log); dirs_new[d] = cand
+                if dirs_new:
+                    pending[coin] = dirs_new
+                else:
+                    # diagnostik kenapa tak ada setup (BOS? FVG? alasan)
+                    build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True)
 
             except Exception as e:
                 print(f"⚠️ Error {coin}: {e}"); continue
