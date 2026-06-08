@@ -81,6 +81,7 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
+RISK_PCT         = 0.03   # risk per trade = 3% dari total equity
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -474,7 +475,7 @@ def place_market_order(symbol, side, entry, sl, trail_dist):
         acct    = res_bal['result']['list'][0]
         balance = float(acct['totalEquity'])
         avail   = float(acct.get('totalAvailableBalance') or balance)
-        risk_usd = balance * 0.01
+        risk_usd = balance * RISK_PCT
         dist     = abs(entry - sl)
         if dist == 0:
             print(f"⚠️ {symbol}: dist entry-SL = 0, skip.")
@@ -579,7 +580,7 @@ def place_limit_order(symbol, side, entry_p, sl_p):
         acct    = res_bal['result']['list'][0]
         balance = float(acct['totalEquity'])
         avail   = float(acct.get('totalAvailableBalance') or balance)
-        risk_usd = balance * 0.01
+        risk_usd = balance * RISK_PCT
         dist     = abs(entry_p - sl_p)
         if dist == 0:
             print(f"⚠️ {symbol}: dist entry-SL = 0, skip.")
@@ -1205,11 +1206,12 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.1 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
+          f"risk {RISK_PCT*100:.0f}%/trade | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
