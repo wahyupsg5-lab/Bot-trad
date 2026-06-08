@@ -966,16 +966,22 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     if not sh_h1 or not sl_h1:
         return None, None
     is_long = False; is_short = False; swing_val = None; brk_idx = None
+    idx_arr = df_h1_live.index
+    closes  = df_h1_live['close']
+    # BOS = swing yang SUDAH ditembus candle SETELAHNYA (historis), bukan cuma candle terakhir.
+    # Tetap terdeteksi selama harga retrace (fase entry) & lintas-redeploy.
     if force_dir in (None, "Long"):
-        for sh in sh_h1[-3:]:
-            if closed_h1['close'] > sh['val']:
-                is_long = True; swing_val = sh['val']; brk_idx = sh['idx']
+        for sh in sh_h1[-4:]:
+            later = closes[idx_arr > sh['idx']]
+            if len(later) and (later > sh['val']).any():
+                is_long = True; swing_val = sh['val']; brk_idx = sh['idx']   # last-wins = terbaru
     if force_dir in (None, "Short"):
-        for sl in sl_h1[-3:]:
-            if closed_h1['close'] < sl['val']:
+        for sl in sl_h1[-4:]:
+            later = closes[idx_arr > sl['idx']]
+            if len(later) and (later < sl['val']).any():
                 is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
     if not (is_long or is_short):
-        if verbose: print(f"   {coin}: tidak ada BOS H1")
+        if verbose: print(f"   {coin}: tidak ada BOS {force_dir or 'H1'}")
         return None, None
     if force_dir == "Long":
         stype = "Long"
@@ -986,6 +992,11 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
     if swing_val is None or bos_idx is None or choch_level is None:
         if verbose: print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)")
+        return None, None
+    # Tolak kalau BOS sudah invalid: harga (close terakhir) sudah melewati CHoCH
+    cc = float(closed_h1['close'])
+    if (stype == "Long" and cc < choch_level) or (stype == "Short" and cc > choch_level):
+        if verbose: print(f"   {coin}: BOS {stype} sudah invalid (close {cc:.6g} lewat CHoCH {choch_level:.6g})")
         return None, None
     gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
     if not gaps:
@@ -1206,7 +1217,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.3 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
@@ -1305,8 +1316,9 @@ def run_bot():
                 if dirs_new:
                     pending[coin] = dirs_new
                 else:
-                    # diagnostik kenapa tak ada setup (BOS? FVG? alasan)
-                    build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True)
+                    # diagnostik DUA ARAH: kenapa tak ada setup (BOS? FVG? stale? invalid?)
+                    build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir='Long')
+                    build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir='Short')
 
             except Exception as e:
                 print(f"⚠️ Error {coin}: {e}"); continue
