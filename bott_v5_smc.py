@@ -443,14 +443,14 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
 
 
 def c1_is_fresh(df, gap, stype):
-    """C1 fresh = belum ada candle SETELAH C3 (s/d candle closed terakhir) yang menyentuh C1.close.
-    Long: low <= c1_close menyentuh. Short: high >= c1_close menyentuh."""
+    """C1 fresh = belum ada candle SETELAH C3 (termasuk candle TERBARU walau belum close)
+    yang menyentuh C1.close. Long: low <= c1_close. Short: high >= c1_close."""
     c3i = gap.get('c3_idx')
     c1c = float(gap.get('c1_close', 0))
     if c3i is None or c1c <= 0:
         return True
     n = len(df)
-    for k in range(int(c3i) + 1, n - 1):   # candle setelah C3 s/d candle CLOSED terakhir (exclude candle berjalan)
+    for k in range(int(c3i) + 1, n):   # candle setelah C3 s/d candle TERBARU (ikut yg belum close)
         if stype == "Long" and float(df['low'].iloc[k]) <= c1c:
             return False
         if stype == "Short" and float(df['high'].iloc[k]) >= c1c:
@@ -1015,6 +1015,8 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
                         gs = g['top'] - g['bottom']; ocl = float(g.get('c3_open', 0))
                         if ocl > 0 and MAX_GAP_PCT > 0 and gs / ocl > MAX_GAP_PCT:
                             why = f"gap{gs / ocl * 100:.2f}%"
+                        elif REQUIRE_FRESH_C1 and not c1_is_fresh(df_h1_live, g, stype):
+                            why = "stale"
                         else:
                             why = "OK"
                 tags.append(f"{r:.0f}%:{why}")
@@ -1203,7 +1205,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.0 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.1 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
