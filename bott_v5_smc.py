@@ -296,9 +296,10 @@ def find_last_swing_bos(df, n=SWING_BARS):
     return highs, lows
 
 
-def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1):
-    """CHOCH = swing low (Long) / high (Short) yang MELONTARKAN impulse, yaitu swing
-    terakhir SEBELUM puncak/lembah impulse. Return (bos_idx, choch_level, peak_val).
+def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df=None):
+    """CHOCH = protective low/high = EKSTREM (low terendah / high tertinggi) ANTARA
+    swing-1 (yang di-break) dan puncak/lembah swing-2 — yaitu launch impulse, bukan
+    swing lama di belakang swing-1. Return (bos_idx, choch_level, peak_val).
     peak_val = swing 5-5 terkonfirmasi yang jadi puncak/lembah (None bila belum terbentuk)."""
     if swing_val is None or brk_idx is None or not sh_h1 or not sl_h1:
         return None, None, None
@@ -308,6 +309,9 @@ def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1):
             pk = max(peaks, key=lambda x: x['val']); b_idx = pk['idx']; peak_val = pk['val']
         else:
             b_idx = sh_h1[-1]['idx']; peak_val = None
+        if df is not None and b_idx > brk_idx and len(df) > b_idx:
+            seg = df['low'].iloc[brk_idx:b_idx + 1]
+            return int(seg.idxmin()), float(seg.min()), peak_val
         mids = [x for x in sl_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sl_h1 if x['idx'] < b_idx]
         if not mids:
             return None, None, None
@@ -318,6 +322,9 @@ def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1):
             tr = min(troughs, key=lambda x: x['val']); b_idx = tr['idx']; peak_val = tr['val']
         else:
             b_idx = sl_h1[-1]['idx']; peak_val = None
+        if df is not None and b_idx > brk_idx and len(df) > b_idx:
+            seg = df['high'].iloc[brk_idx:b_idx + 1]
+            return int(seg.idxmax()), float(seg.max()), peak_val
         mids = [x for x in sh_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sh_h1 if x['idx'] < b_idx]
         if not mids:
             return None, None, None
@@ -963,7 +970,7 @@ def replay_h1(coin, df_h1):
         return None
 
     stype = "Short" if is_short else "Long"
-    bos_idx, choch_level, _pk = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+    bos_idx, choch_level, _pk = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df_h1)
     if bos_idx is None or choch_level is None:
         return None
 
@@ -1056,7 +1063,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         stype = "Short"
     else:
         stype = "Short" if is_short else "Long"
-    bos_idx, choch_level, peak_val = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+    bos_idx, choch_level, peak_val = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df_h1_live)
     if swing_val is None or bos_idx is None or choch_level is None:
         if verbose: print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)")
         return None, None
@@ -1306,7 +1313,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.0 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
