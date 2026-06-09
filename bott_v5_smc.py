@@ -81,7 +81,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
-RISK_PCT         = 0.03   # risk per trade = 3% dari total equity
+RISK_PCT         = 0.02   # risk per trade = 3% dari total equity
+LEVERAGE         = 15     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -572,7 +573,7 @@ def place_market_order(symbol, side, entry, sl, trail_dist):
         lev_int = 10
         try:
             max_lev = float(info.get('max_leverage', 10))
-            lev_int = int(min(10, max_lev))
+            lev_int = int(min(LEVERAGE, max_lev))
             res_lev = session.set_leverage(category=CATEGORY, symbol=symbol,
                                            buyLeverage=str(lev_int), sellLeverage=str(lev_int))
             if res_lev.get('retCode', -1) not in (0, 110043):
@@ -691,7 +692,7 @@ def place_limit_order(symbol, side, entry_p, sl_p):
         lev_int = 10
         try:
             max_lev = float(info.get('max_leverage', 10))
-            lev_int = int(min(10, max_lev))
+            lev_int = int(min(LEVERAGE, max_lev))
             res_lev = session.set_leverage(category=CATEGORY, symbol=symbol,
                                            buyLeverage=str(lev_int), sellLeverage=str(lev_int))
             if res_lev.get('retCode', -1) not in (0, 110043):   # 110043 = sudah di leverage ini
@@ -1305,12 +1306,12 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.8 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
-          f"risk {RISK_PCT*100:.0f}%/trade | "
+          f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
