@@ -1282,9 +1282,12 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
                 'peak': actual_entry, 'peak_time': time.time(),
                 'swing_val': setup.get('swing_val'), 'bos_type': stype, 'rev_count': 0,
                 'orig_ocl': setup.get('orig_ocl', setup.get('entry')),
+                'choch_level': setup.get('choch_level'), 'peak_val': setup.get('peak_val'),
+                'swing2': setup.get('swing2'),
             }
             done_setups[coin] = {'swing_val': setup.get('swing_val'), 'stype': stype, 'used_ocl': setup.get('entry')}
-            print(f"✅ {coin}: Limit filled! Entry:{actual_entry:.6f} SL:{sl_p:.6f}")
+            print(f"✅ {coin} {stype}: Limit filled! Entry:{actual_entry:.6f} SL:{sl_p:.6f} | "
+                  f"break:{setup.get('swing_val'):.6g} puncak:{setup.get('peak_val'):.6g} CHOCH:{setup.get('choch_level'):.6g}")
             return 'fill'
         else:
             oid = setup.get('order_id')
@@ -1302,7 +1305,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.7 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v6.8 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
@@ -1335,11 +1338,18 @@ def run_bot():
         print(f"\n{'='*55}")
         print(f"📊 SLOT: {slots_used}/{MAX_CONCURRENT} terpakai (posisi:{n_active} | limit:{n_waitfill} | watch:{n_approach})")
         if active_positions:
-            print(f"   Aktif: {', '.join(active_positions.keys())}")
+            for c, p in active_positions.items():
+                bk = p.get('swing_val'); pk = p.get('peak_val'); ch = p.get('choch_level')
+                bk = f"{bk:.6g}" if bk else "—"; pk = f"{pk:.6g}" if pk else "—"; ch = f"{ch:.6g}" if ch else "—"
+                print(f"   POSISI {c} {p.get('bos_type','?')} @ {p.get('entry',0):.6g} SL:{p.get('sl',0):.6g} | "
+                      f"break:{bk} puncak:{pk} CHOCH:{ch}")
         if pending:
             for c, dirs in pending.items():
                 for d, st in dirs.items():
-                    print(f"   {c} [{d}]: {st.get('phase','?')} @ {st.get('entry',0):.6g}")
+                    bk = st.get('swing_val'); pk = st.get('peak_val'); ch = st.get('choch_level')
+                    bk = f"{bk:.6g}" if bk else "—"; pk = f"{pk:.6g}" if pk else "—"; ch = f"{ch:.6g}" if ch else "—"
+                    print(f"   {c} [{d}]: {st.get('phase','?')} @ {st.get('entry',0):.6g} | "
+                          f"break:{bk} puncak:{pk} CHOCH:{ch}")
         print(f"{'='*55}")
 
         for coin in SYMBOLS:
