@@ -279,6 +279,9 @@ SWING_BARS = 5
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
+REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
+ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
+RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
 
 def find_last_swing_bos(df, n=SWING_BARS):
     highs, lows = [], []
@@ -294,24 +297,85 @@ def find_last_swing_bos(df, n=SWING_BARS):
 
 def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1):
     """CHOCH = swing low (Long) / high (Short) yang MELONTARKAN impulse, yaitu swing
-    terakhir SEBELUM puncak/lembah impulse — bukan swing baru yang terbentuk saat pullback.
-    Return (bos_idx, choch_level)."""
+    terakhir SEBELUM puncak/lembah impulse. Return (bos_idx, choch_level, peak_val).
+    peak_val = swing 5-5 terkonfirmasi yang jadi puncak/lembah (None bila belum terbentuk)."""
     if swing_val is None or brk_idx is None or not sh_h1 or not sl_h1:
-        return None, None
+        return None, None, None
     if stype == "Long":
         peaks = [x for x in sh_h1 if x['idx'] > brk_idx and x['val'] > swing_val]
-        b_idx = (max(peaks, key=lambda x: x['val'])['idx'] if peaks else sh_h1[-1]['idx'])
+        if peaks:
+            pk = max(peaks, key=lambda x: x['val']); b_idx = pk['idx']; peak_val = pk['val']
+        else:
+            b_idx = sh_h1[-1]['idx']; peak_val = None
         mids = [x for x in sl_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sl_h1 if x['idx'] < b_idx]
         if not mids:
-            return None, None
-        return mids[-1]['idx'], mids[-1]['val']
+            return None, None, None
+        return mids[-1]['idx'], mids[-1]['val'], peak_val
     else:
         troughs = [x for x in sl_h1 if x['idx'] > brk_idx and x['val'] < swing_val]
-        b_idx = (min(troughs, key=lambda x: x['val'])['idx'] if troughs else sl_h1[-1]['idx'])
+        if troughs:
+            tr = min(troughs, key=lambda x: x['val']); b_idx = tr['idx']; peak_val = tr['val']
+        else:
+            b_idx = sl_h1[-1]['idx']; peak_val = None
         mids = [x for x in sh_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sh_h1 if x['idx'] < b_idx]
         if not mids:
-            return None, None
-        return mids[-1]['idx'], mids[-1]['val']
+            return None, None, None
+        return mids[-1]['idx'], mids[-1]['val'], peak_val
+
+
+def rebreak_invalid(df, start_idx, swing2, choch_level, stype, lock_retr=0.50):
+    """True bila SETELAH harga retrace >= lock_retr (dari swing2 ke arah choch),
+    ada candle yang CLOSE melewati swing2 (= rebreak, struktur baru).
+    swing2 = puncak/lembah swing 5-5 (TETAP). Dihitung historis -> konsisten lintas-redeploy."""
+    n = len(df)
+    if swing2 is None or start_idx is None or start_idx >= n - 1 or choch_level is None:
+        return False
+    hi = df['high'].values; lo = df['low'].values; cl = df['close'].values
+    if stype == "Long":
+        rng = swing2 - choch_level
+        if rng <= 0:
+            return False
+        half = swing2 - lock_retr * rng
+        retraced = False
+        for k in range(int(start_idx) + 1, n):
+            if lo[k] <= half:
+                retraced = True
+            if retraced and cl[k] > swing2:
+                return True
+        return False
+    else:
+        rng = choch_level - swing2
+        if rng <= 0:
+            return False
+        half = swing2 + lock_retr * rng
+        retraced = False
+        for k in range(int(start_idx) + 1, n):
+            if hi[k] >= half:
+                retraced = True
+            if retraced and cl[k] < swing2:
+                return True
+        return False
+
+
+def deepest_retrace_lo(df, bos_idx, choch_level, stype):
+    """Batas bawah zona entry dinamis = max(ENTRY_ZONE_LO, retrace TERDALAM setelah puncak).
+    Area 0..retrace_terdalam sudah dilewati candle retrace -> tak boleh dipakai entry (sudah terisi)."""
+    n = len(df)
+    if not ZONE_FROM_RETRACE or bos_idx is None or bos_idx >= n or choch_level is None:
+        return ENTRY_ZONE_LO
+    if stype == "Long":
+        sub = df['high'].iloc[bos_idx:]
+        B = float(sub.max()); pk = int(sub.idxmax()); rng = B - choch_level
+        if rng <= 0: return ENTRY_ZONE_LO
+        low_after = float(df['low'].iloc[pk:].min())
+        frac = (B - low_after) / rng
+    else:
+        sub = df['low'].iloc[bos_idx:]
+        B = float(sub.min()); pk = int(sub.idxmin()); rng = choch_level - B
+        if rng <= 0: return ENTRY_ZONE_LO
+        high_after = float(df['high'].iloc[pk:].max())
+        frac = (high_after - B) / rng
+    return max(ENTRY_ZONE_LO, min(frac, ENTRY_ZONE_HI))
 
 
 # ============================================================
@@ -397,9 +461,11 @@ def candle_touches_fvg(candle, fvg, stype):
         return candle['high'] >= fvg['bottom'] and not fvg_fully_broken(candle, fvg, stype)
 
 
-def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
-    """FVG biasa (TANPA syarat volume): C1/C3 fields valid, CHOCH filter, MAX_GAP_PCT filter, fresh-C1."""
+def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None):
+    """FVG biasa (TANPA syarat volume): C1/C3 valid, CHOCH filter, zona entry, MAX_GAP, fresh-C1.
+    zone_lo = batas bawah zona (default ENTRY_ZONE_LO). Dipakai utk zona dinamis (>= retrace terdalam)."""
     gaps = get_internal_gaps(df_h1, stype, bos_idx)
+    z_lo = ENTRY_ZONE_LO if zone_lo is None else zone_lo
     # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
     gaps = [g for g in gaps
             if g.get('c3_open', 0) > 0
@@ -410,7 +476,7 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
             gaps = [g for g in gaps if g['bottom'] >= choch_level]
         else:
             gaps = [g for g in gaps if g['top'] <= choch_level]
-    # Filter ZONA ENTRY: C1.close harus di retrace ENTRY_ZONE_LO..HI dari range BOS
+    # Filter ZONA ENTRY: C1.close harus di retrace z_lo..HI dari range BOS
     # 0% = ekstrem impulse (swing terbaru), 100% = CHOCH. Long: zona di bawah; Short: di atas.
     if choch_level and len(df_h1) > bos_idx:
         if stype == "Long":
@@ -419,14 +485,14 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None):
             rng = B - L
             if rng > 0:
                 lo = B - ENTRY_ZONE_HI * rng                # batas terdalam (100%)
-                hi = B - ENTRY_ZONE_LO * rng                # batas terdangkal (50%)
+                hi = B - z_lo * rng                         # batas terdangkal (z_lo)
                 gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
         else:
             B = float(df_h1['low'].iloc[bos_idx:].min())    # impulse low (0%)
             L = float(choch_level)                          # invalidasi (100%)
             rng = L - B
             if rng > 0:
-                lo = B + ENTRY_ZONE_LO * rng                # batas terdangkal (50%)
+                lo = B + z_lo * rng                         # batas terdangkal (z_lo)
                 hi = B + ENTRY_ZONE_HI * rng                # batas terdalam (100%)
                 gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
     # MAX_GAP_PCT: gap tidak boleh terlalu besar
@@ -896,7 +962,7 @@ def replay_h1(coin, df_h1):
         return None
 
     stype = "Short" if is_short else "Long"
-    bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+    bos_idx, choch_level, _pk = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
     if bos_idx is None or choch_level is None:
         return None
 
@@ -989,7 +1055,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         stype = "Short"
     else:
         stype = "Short" if is_short else "Long"
-    bos_idx, choch_level = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
+    bos_idx, choch_level, peak_val = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1)
     if swing_val is None or bos_idx is None or choch_level is None:
         if verbose: print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)")
         return None, None
@@ -998,16 +1064,25 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     if (stype == "Long" and cc < choch_level) or (stype == "Short" and cc > choch_level):
         if verbose: print(f"   {coin}: BOS {stype} sudah invalid (close {cc:.6g} lewat CHoCH {choch_level:.6g})")
         return None, None
-    gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
+    # Puncak/lembah B = ekstrem LANGSUNG (tanpa nunggu) untuk zona/cap/log.
+    if stype == "Long":
+        _B = float(df_h1_live['high'].iloc[bos_idx:].max())
+    else:
+        _B = float(df_h1_live['low'].iloc[bos_idx:].min())
+    bos_rng = (_B - choch_level) if stype == "Long" else (choch_level - _B)
+    # Invalidasi struktur: swing-2 = puncak swing 5-5; bila harga retrace >= RETRACE_LOCK
+    # lalu CLOSE melewati swing-2 -> BOS invalid (struktur baru), tunggu BOS baru.
+    if REBREAK_INVALID and peak_val is not None and \
+       rebreak_invalid(df_h1_live, bos_idx, peak_val, choch_level, stype, RETRACE_LOCK):
+        if verbose: print(f"   {coin}: BOS {stype} INVALID — retrace>={RETRACE_LOCK*100:.0f}% lalu close lewati swing-2 {peak_val:.6g} (tunggu BOS baru)")
+        return None, None
+    zlo = deepest_retrace_lo(df_h1_live, bos_idx, choch_level, stype)
+    gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level, zone_lo=zlo)
     if not gaps:
         if verbose:
             raw = get_internal_gaps(df_h1_live, stype, bos_idx)
-            if stype == "Long":
-                Bp = float(df_h1_live['high'].iloc[bos_idx:].max()); rng = Bp - choch_level
-                z618 = Bp - ENTRY_ZONE_LO * rng
-            else:
-                Bp = float(df_h1_live['low'].iloc[bos_idx:].min()); rng = choch_level - Bp
-                z618 = Bp + ENTRY_ZONE_LO * rng
+            Bp = _B; rng = bos_rng
+            z618 = (Bp - zlo * rng) if stype == "Long" else (Bp + zlo * rng)
             tags = []
             for g in raw:
                 c1c = float(g.get('c1_close', 0))
@@ -1018,11 +1093,11 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
                     why = "choch"
                 else:
                     if stype == "Long":
-                        lo = Bp - ENTRY_ZONE_HI * rng; hi = Bp - ENTRY_ZONE_LO * rng
+                        lo = Bp - ENTRY_ZONE_HI * rng; hi = Bp - zlo * rng
                     else:
-                        lo = Bp + ENTRY_ZONE_LO * rng; hi = Bp + ENTRY_ZONE_HI * rng
+                        lo = Bp + zlo * rng; hi = Bp + ENTRY_ZONE_HI * rng
                     if not (lo <= c1c <= hi):
-                        why = "zona"
+                        why = "dilewati" if r < zlo * 100 else "zona"
                     else:
                         gs = g['top'] - g['bottom']; ocl = float(g.get('c3_open', 0))
                         if ocl > 0 and MAX_GAP_PCT > 0 and gs / ocl > MAX_GAP_PCT:
@@ -1034,7 +1109,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
                 tags.append(f"{r:.0f}%:{why}")
             print(f"   {coin}: BOS {stype} tdk ada FVG di zona | break={swing_val:.6g} "
                   f"choch={choch_level:.6g} puncak={Bp:.6g} | rawFVG={len(raw)} "
-                  f"[{', '.join(tags)}] (zona>={ENTRY_ZONE_LO*100:.1f}%@{z618:.6g}, maxgap={MAX_GAP_PCT*100:.2f}%)")
+                  f"[{', '.join(tags)}] (zona>={zlo*100:.1f}%@{z618:.6g}, maxgap={MAX_GAP_PCT*100:.2f}%)")
         return None, None
     bos_ts = df_h1_live['ts'].iloc[bos_idx]
     g0 = gaps[0]
@@ -1053,11 +1128,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         _allowed = SESSION_FILTER.get(coin)
         if _allowed is not None and _sesi not in _allowed:
             return None, None
-    # Cap SL: jarak entry->SL maksimal SL_CAP_RANGE × range BOS
-    if stype == "Long":
-        _B = float(df_h1_live['high'].iloc[bos_idx:].max()); bos_rng = _B - choch_level
-    else:
-        _B = float(df_h1_live['low'].iloc[bos_idx:].min()); bos_rng = choch_level - _B
+    # Cap SL: jarak entry->SL maksimal SL_CAP_RANGE × range BOS (_B/bos_rng sudah dihitung di atas)
     if SL_CAP_RANGE > 0 and bos_rng > 0 and dist > SL_CAP_RANGE * bos_rng:
         dist = SL_CAP_RANGE * bos_rng
         sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
@@ -1078,6 +1149,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         'type': stype, 'phase': 'WAIT_APPROACH', 'entry': entry_adj, 'sl': sl_entry,
         'dist': dist, 'orig_ocl': c1_c, 'fvg_list': gaps, 'bos_ts': bos_ts,
         'bos_idx': bos_idx, 'swing_val': swing_val, 'choch_level': choch_level,
+        'peak_val': _B, 'swing2': peak_val, 'brk_idx': brk_idx,
     }
     return setup, logline
 
@@ -1104,13 +1176,25 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
             if setup.get('order_id'): cancel_order(coin, setup['order_id'])
             print(f"🔄 {coin} {stype}: CHOCH {choch_level:.6f} ditembus. Setup batal.")
             return 'remove'
-    # refresh FVG dari bos_idx (re-locate via bos_ts)
+    # Invalidasi struktur (historis): retrace >= RETRACE_LOCK lalu close lewati swing-2 (puncak 5-5)
+    if REBREAK_INVALID:
+        sw2 = setup.get('swing2')
+        bi  = setup.get('bos_idx', 0)
+        bts = setup.get('bos_ts', 0)
+        rows = df_h1_live.index[df_h1_live['ts'] == bts]
+        if len(rows) > 0:
+            bi = int(rows[0])
+        if sw2 is not None and rebreak_invalid(df_h1_live, bi, sw2, choch_level, stype, RETRACE_LOCK):
+            if setup.get('order_id'): cancel_order(coin, setup['order_id'])
+            print(f"🧱 {coin} {stype}: retrace>={RETRACE_LOCK*100:.0f}% lalu lewati swing-2 {sw2:.6f} — struktur baru, setup batal.")
+            return 'remove'
     bos_ts_val = setup.get('bos_ts', 0)
     bos_rows   = df_h1_live.index[df_h1_live['ts'] == bos_ts_val]
     if len(bos_rows) > 0:
         bos_idx = int(bos_rows[0]); setup['bos_idx'] = bos_idx
     if bos_idx < len(df_h1_live):
-        fresh = _get_fvgs(df_h1_live, stype, bos_idx, choch_level)
+        fresh = _get_fvgs(df_h1_live, stype, bos_idx, choch_level,
+                          zone_lo=deepest_retrace_lo(df_h1_live, bos_idx, choch_level, stype))
         if fresh: setup['fvg_list'] = fresh
     if not setup.get('fvg_list'):
         if setup.get('order_id'): cancel_order(coin, setup['order_id'])
@@ -1140,7 +1224,8 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
             order_id   = place_limit_order(coin, side_order, entry, setup['sl'])
             if order_id:
                 setup['phase'] = 'WAIT_FILL'; setup['order_id'] = order_id
-                print(f"📍 {coin} {stype}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R)")
+                print(f"📍 {coin} {stype}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R) | "
+                      f"break:{setup.get('swing_val'):.6g} puncak:{setup.get('peak_val'):.6g} CHOCH:{setup.get('choch_level'):.6g}")
                 return 'lock'
             return 'remove'
         return 'keep'
@@ -1217,8 +1302,8 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v6.3 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
-          f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}% | "
+    print(f"CONFIG v6.7 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+          f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
@@ -1303,6 +1388,10 @@ def run_bot():
                         elif cand['swing_val'] != cur.get('swing_val'):
                             print(f"🔁 {coin} {d}: BOS lebih baru — ganti (break {cur.get('swing_val')} → {cand['swing_val']:.6g})")
                             print(cand_log); dirs[d] = cand
+                        else:
+                            # arah & swing sama -> segarkan swing2/FVG (tanpa log) agar invalidasi akurat
+                            cur['swing2'] = cand.get('swing2'); cur['peak_val'] = cand.get('peak_val')
+                            cur['choch_level'] = cand.get('choch_level'); cur['fvg_list'] = cand.get('fvg_list', cur.get('fvg_list'))
                     if not dirs:
                         pending.pop(coin, None)
                     continue
