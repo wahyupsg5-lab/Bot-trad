@@ -305,26 +305,27 @@ def impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df=None):
         return None, None, None
     if stype == "Long":
         peaks = [x for x in sh_h1 if x['idx'] > brk_idx and x['val'] > swing_val]
-        if peaks:
-            pk = max(peaks, key=lambda x: x['val']); b_idx = pk['idx']; peak_val = pk['val']
-        else:
-            b_idx = sh_h1[-1]['idx']; peak_val = None
-        if df is not None and b_idx > brk_idx and len(df) > b_idx:
-            seg = df['low'].iloc[brk_idx:b_idx + 1]
-            return int(seg.idxmin()), float(seg.min()), peak_val
+        peak_val = max(peaks, key=lambda x: x['val'])['val'] if peaks else None
+        # CHOCH = low TERENDAH antara break (swing-1) dan PUNCAK MENTAH (high tertinggi setelah break)
+        if df is not None and len(df) > brk_idx + 1:
+            peak_idx = int(df['high'].iloc[brk_idx:].idxmax())
+            if peak_idx > brk_idx:
+                seg = df['low'].iloc[brk_idx:peak_idx + 1]
+                return int(seg.idxmin()), float(seg.min()), peak_val
+        b_idx = (max(peaks, key=lambda x: x['val'])['idx'] if peaks else sh_h1[-1]['idx'])
         mids = [x for x in sl_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sl_h1 if x['idx'] < b_idx]
         if not mids:
             return None, None, None
         return mids[-1]['idx'], mids[-1]['val'], peak_val
     else:
         troughs = [x for x in sl_h1 if x['idx'] > brk_idx and x['val'] < swing_val]
-        if troughs:
-            tr = min(troughs, key=lambda x: x['val']); b_idx = tr['idx']; peak_val = tr['val']
-        else:
-            b_idx = sl_h1[-1]['idx']; peak_val = None
-        if df is not None and b_idx > brk_idx and len(df) > b_idx:
-            seg = df['high'].iloc[brk_idx:b_idx + 1]
-            return int(seg.idxmax()), float(seg.max()), peak_val
+        peak_val = min(troughs, key=lambda x: x['val'])['val'] if troughs else None
+        if df is not None and len(df) > brk_idx + 1:
+            trough_idx = int(df['low'].iloc[brk_idx:].idxmin())
+            if trough_idx > brk_idx:
+                seg = df['high'].iloc[brk_idx:trough_idx + 1]
+                return int(seg.idxmax()), float(seg.max()), peak_val
+        b_idx = (min(troughs, key=lambda x: x['val'])['idx'] if troughs else sl_h1[-1]['idx'])
         mids = [x for x in sh_h1 if brk_idx <= x['idx'] < b_idx] or [x for x in sh_h1 if x['idx'] < b_idx]
         if not mids:
             return None, None, None
@@ -1313,7 +1314,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.0 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.1 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
