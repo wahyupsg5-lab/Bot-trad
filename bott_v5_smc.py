@@ -81,8 +81,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
-RISK_PCT         = 0.03   # risk per trade = 3% dari total equity
-LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+RISK_PCT         = 0.02   # risk per trade = 3% dari total equity
+LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -364,6 +364,20 @@ def rebreak_invalid(df, start_idx, swing2, choch_level, stype, lock_retr=0.50):
             if retraced and cl[k] < swing2:
                 return True
         return False
+
+
+def choch_is_broken(df, bos_idx, choch_level, stype):
+    """CHoCH ditembus = SETELAH puncak, ada candle yang CLOSE menembus choch (Long: < choch / Short: > choch).
+    Historis -> tetap mati walau harga sudah balik. bos_idx = indeks choch (launch)."""
+    n = len(df)
+    if bos_idx is None or bos_idx >= n or choch_level is None:
+        return False
+    if stype == "Long":
+        peak_idx = int(df['high'].iloc[bos_idx:].idxmax())
+        return bool((df['close'].iloc[peak_idx:] < choch_level).any())
+    else:
+        peak_idx = int(df['low'].iloc[bos_idx:].idxmin())
+        return bool((df['close'].iloc[peak_idx:] > choch_level).any())
 
 
 def deepest_retrace_lo(df, bos_idx, choch_level, stype):
@@ -1068,19 +1082,40 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         stype = "Short" if is_short else "Long"
     bos_idx, choch_level, peak_val = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df_h1_live)
     if swing_val is None or bos_idx is None or choch_level is None:
-        if verbose: print(f"   {coin}: struktur BOS tak lengkap (choch sebelum puncak tak ada)")
+        if verbose:
+            if swing_val is None:
+                print(f"   {coin}: tak ada swing 5-5 yang ter-break ({stype})")
+            else:
+                if stype == "Long":
+                    pk_idx = int(df_h1_live['high'].iloc[brk_idx:].idxmax())
+                    pk_val = float(df_h1_live['high'].iloc[brk_idx:].max())
+                    cand_list = sl_h1; what = "swingLow"
+                else:
+                    pk_idx = int(df_h1_live['low'].iloc[brk_idx:].idxmin())
+                    pk_val = float(df_h1_live['low'].iloc[brk_idx:].min())
+                    cand_list = sh_h1; what = "swingHigh"
+                tags = []
+                for x in cand_list:
+                    if x['idx'] < brk_idx:   pos = "✗sblm-break"
+                    elif x['idx'] >= pk_idx: pos = "✗stlh-puncak"
+                    else:                    pos = "✓DALAM"
+                    tags.append(f"{x['val']:.6g}@{x['idx']}[{pos}]")
+                body = ', '.join(tags) if tags else '(tak ada swing 5-5 sama sekali)'
+                print(f"   {coin}: BOS {stype} tak lengkap — break={swing_val:.6g}@{brk_idx} puncak={pk_val:.6g}@{pk_idx} | {what}5-5 kandidat choch: {body}")
         return None, None
-    # Tolak kalau BOS sudah invalid: harga (close terakhir) sudah melewati CHoCH
-    cc = float(closed_h1['close'])
-    if (stype == "Long" and cc < choch_level) or (stype == "Short" and cc > choch_level):
-        if verbose: print(f"   {coin}: BOS {stype} sudah invalid (close {cc:.6g} lewat CHoCH {choch_level:.6g})")
-        return None, None
-    # Puncak/lembah B = ekstrem LANGSUNG (tanpa nunggu) untuk zona/cap/log.
+    # Puncak/lembah B + indeksnya (ekstrem langsung, tanpa nunggu)
     if stype == "Long":
-        _B = float(df_h1_live['high'].iloc[bos_idx:].max())
+        sub = df_h1_live['high'].iloc[bos_idx:]; _B = float(sub.max()); peak_idx = int(sub.idxmax())
     else:
-        _B = float(df_h1_live['low'].iloc[bos_idx:].min())
+        sub = df_h1_live['low'].iloc[bos_idx:]; _B = float(sub.min()); peak_idx = int(sub.idxmin())
     bos_rng = (_B - choch_level) if stype == "Long" else (choch_level - _B)
+    # CHoCH invalidation HISTORIS: kalau SETELAH puncak ada candle yang CLOSE menembus choch -> BOS mati
+    # (walau harga sekarang sudah balik). Sebelumnya cuma cek close terakhir -> bocor.
+    seg_cl = df_h1_live['close'].iloc[peak_idx:]
+    choch_broken = bool((seg_cl < choch_level).any()) if stype == "Long" else bool((seg_cl > choch_level).any())
+    if choch_broken:
+        if verbose: print(f"   {coin}: BOS {stype} sudah CHoCH — harga pernah close lewat choch {choch_level:.6g} (mati, tunggu BOS baru)")
+        return None, None
     # Invalidasi struktur: swing-2 = puncak swing 5-5; bila harga retrace >= RETRACE_LOCK
     # lalu CLOSE melewati swing-2 -> BOS invalid (struktur baru), tunggu BOS baru.
     if REBREAK_INVALID and peak_val is not None and \
@@ -1185,13 +1220,16 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
     """Proses 1 setup (1 arah). Mutasi setup in-place.
     Return: 'remove' | 'keep' (WAIT_APPROACH) | 'lock' (WAIT_FILL) | 'fill' (posisi sudah dibuka)."""
     stype = setup['type']; choch_level = setup.get('choch_level'); bos_idx = setup.get('bos_idx', 0)
-    # CHOCH invalidation
+    # CHOCH invalidation (HISTORIS): kalau harga pernah close menembus choch setelah puncak -> mati
     if choch_level:
-        invalid = (stype == "Long"  and curr_h1['close'] < choch_level) or \
-                  (stype == "Short" and curr_h1['close'] > choch_level)
-        if invalid:
+        bi0 = setup.get('bos_idx', 0)
+        bts0 = setup.get('bos_ts', 0)
+        rows0 = df_h1_live.index[df_h1_live['ts'] == bts0]
+        if len(rows0) > 0:
+            bi0 = int(rows0[0])
+        if choch_is_broken(df_h1_live, bi0, choch_level, stype):
             if setup.get('order_id'): cancel_order(coin, setup['order_id'])
-            print(f"🔄 {coin} {stype}: CHOCH {choch_level:.6f} ditembus. Setup batal.")
+            print(f"🔄 {coin} {stype}: CHOCH {choch_level:.6f} sudah ditembus (historis). Setup batal.")
             return 'remove'
     # Invalidasi struktur (historis): retrace >= RETRACE_LOCK lalu close lewati swing-2 (puncak 5-5)
     if REBREAK_INVALID:
@@ -1329,7 +1367,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.5 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.7 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
