@@ -82,7 +82,7 @@ TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari 
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
 RISK_PCT         = 0.02   # risk per trade = 3% dari total equity
-LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -1060,17 +1060,28 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     idx_arr = df_h1_live.index
     closes  = df_h1_live['close']
     # BOS = swing yang SUDAH ditembus candle SETELAHNYA (historis), bukan cuma candle terakhir.
-    # Tetap terdeteksi selama harga retrace (fase entry) & lintas-redeploy.
+    def _broken(s, up):
+        later = closes[idx_arr > s['idx']]
+        if len(later) == 0: return False
+        return bool((later > s['val']).any()) if up else bool((later < s['val']).any())
+    def _pick(st, swings, up):
+        # kandidat = swing 5-5 yang sudah di-break, urut TERBARU dulu
+        cands = sorted([s for s in swings[-8:] if _broken(s, up)], key=lambda x: x['idx'], reverse=True)
+        # PRIORITAS: swing terbaru yang menghasilkan STRUKTUR LENGKAP (choch 5-5 sah).
+        # Swing kecil tanpa choch dilewati; turun ke swing 5-5 lebih signifikan yang punya choch.
+        for s in cands:
+            bi, ch, pk = impulse_anchors(st, s['val'], s['idx'], sh_h1, sl_h1, df_h1_live)
+            if bi is not None and ch is not None:
+                return s['val'], s['idx']
+        if cands:  # tak ada yang lengkap -> kembalikan terbaru (biar diagnostik muncul)
+            return cands[0]['val'], cands[0]['idx']
+        return None, None
     if force_dir in (None, "Long"):
-        for sh in sh_h1[-4:]:
-            later = closes[idx_arr > sh['idx']]
-            if len(later) and (later > sh['val']).any():
-                is_long = True; swing_val = sh['val']; brk_idx = sh['idx']   # last-wins = terbaru
+        sv, bi = _pick("Long", sh_h1, True)
+        if sv is not None: is_long = True; swing_val = sv; brk_idx = bi
     if force_dir in (None, "Short"):
-        for sl in sl_h1[-4:]:
-            later = closes[idx_arr > sl['idx']]
-            if len(later) and (later < sl['val']).any():
-                is_short = True; swing_val = sl['val']; brk_idx = sl['idx']
+        sv, bi = _pick("Short", sl_h1, False)
+        if sv is not None: is_short = True; swing_val = sv; brk_idx = bi
     if not (is_long or is_short):
         if verbose: print(f"   {coin}: tidak ada BOS {force_dir or 'H1'}")
         return None, None
@@ -1367,7 +1378,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.7 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.8 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
