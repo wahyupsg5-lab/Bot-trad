@@ -1225,8 +1225,15 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
         approaching   = (stype == 'Long'  and curr_price <= entry + thr) or \
                         (stype == 'Short' and curr_price >= entry - thr)
         approach_thr  = entry + thr if stype == 'Long' else entry - thr
-        status_str = "✅ DALAM RANGE" if approaching else "⏳ menunggu"
-        print(f"👁️  {coin} {stype} | now:{curr_price:.6f} entry:{entry:.6f} thr:{approach_thr:.6f} | {status_str}")
+        r_now = ((curr_price - entry) if stype == 'Long' else (entry - curr_price)) / dist if dist > 0 else 0
+        to_arm = r_now - APPROACH_R   # berapa R lagi sampai limit dipasang
+        if approaching:
+            status_str = "✅ DALAM RANGE — pasang limit"
+            r_info = f"{r_now:.2f}R dari entry"
+        else:
+            status_str = "⏳ menunggu"
+            r_info = f"{r_now:.2f}R dari entry (pasang di {APPROACH_R:.1f}R, kurang {to_arm:.2f}R lagi)"
+        print(f"👁️  {coin} {stype} | now:{curr_price:.6f} entry:{entry:.6f} | {r_info} | {status_str}")
         if approaching:
             direction_valid = (stype == 'Long'  and curr_price > entry) or \
                               (stype == 'Short' and curr_price < entry)
@@ -1322,7 +1329,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.4 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.5 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
