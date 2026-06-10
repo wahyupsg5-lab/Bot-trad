@@ -280,6 +280,7 @@ SWING_BARS = 5
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
+ENTRY_C2_WICK = True    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
 REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
@@ -396,12 +397,14 @@ def _gap_vol_fields(df, c3_idx):
     c2_idx   = c3_idx - 1
     c1_idx   = c3_idx - 2
     c2_close = float(df['close'].iloc[c2_idx]) if c2_idx >= 0 else 0.0
+    c2_low   = float(df['low'].iloc[c2_idx])   if c2_idx >= 0 else 0.0
+    c2_high  = float(df['high'].iloc[c2_idx])  if c2_idx >= 0 else 0.0
     c3_open  = float(df['open'].iloc[c3_idx])  if c3_idx < len(df) else 0.0
     c1_open  = float(df['open'].iloc[c1_idx])  if c1_idx >= 0 else 0.0
     c1_close = float(df['close'].iloc[c1_idx]) if c1_idx >= 0 else 0.0
     c1_low   = float(df['low'].iloc[c1_idx])   if c1_idx >= 0 else 0.0
     c1_high  = float(df['high'].iloc[c1_idx])  if c1_idx >= 0 else 0.0
-    base = {'c2_close': c2_close, 'c3_open': c3_open,
+    base = {'c2_close': c2_close, 'c2_low': c2_low, 'c2_high': c2_high, 'c3_open': c3_open,
             'c1_open': c1_open, 'c1_close': c1_close,
             'c1_low': c1_low,   'c1_high': c1_high, 'c3_idx': c3_idx}
     if 'vol' not in df.columns:
@@ -1123,13 +1126,19 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     bos_ts = df_h1_live['ts'].iloc[bos_idx]
     g0 = gaps[0]
     c1_c = float(g0.get('c1_close', 0)); c1_l = float(g0.get('c1_low', 0)); c1_h = float(g0.get('c1_high', 0))
+    c2_l = float(g0.get('c2_low', 0));   c2_h = float(g0.get('c2_high', 0))
     if not (c1_c > 0 and c1_h > c1_l):
         return None, None
     gap_s = float(g0['top']) - float(g0['bottom'])
     if stype == 'Long':
-        entry_adj = c1_c; dist = max(c1_c - c1_l, 0.0) * SL_FRAC; sl_entry = c1_c - dist
+        # Entry = ujung wick C2 (low). SL = invalidasi C1.low. Fallback C1.close bila C2 invalid.
+        entry_adj = c2_l if (ENTRY_C2_WICK and c2_l > 0) else c1_c
+        sl_base   = min(c1_l, entry_adj)            # SL tak boleh di atas entry
+        dist = max(entry_adj - sl_base, 0.0) * SL_FRAC; sl_entry = entry_adj - dist
     else:
-        entry_adj = c1_c; dist = max(c1_h - c1_c, 0.0) * SL_FRAC; sl_entry = c1_c + dist
+        entry_adj = c2_h if (ENTRY_C2_WICK and c2_h > 0) else c1_c
+        sl_base   = max(c1_h, entry_adj)
+        dist = max(sl_base - entry_adj, 0.0) * SL_FRAC; sl_entry = entry_adj + dist
     import datetime as _dt
     _h_s = _dt.datetime.utcfromtimestamp(df_h1_live.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in df_h1_live.columns else -1
     if _h_s >= 0:
@@ -1314,7 +1323,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.1 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
