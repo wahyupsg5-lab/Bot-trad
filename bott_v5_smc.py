@@ -92,23 +92,23 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 1.5    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
-INDUCEMENT_ZONE_HI = 0.61 # inducement dicari di pita 0-61% range BOS besar (dekat puncak/lembah)
-INDUCEMENT_TF    = "5"    # timeframe cari inducement: "5"=M5, "60"=H1
-INDUCEMENT_SWING = 5      # ukuran swing bos kecil: M5 pakai 5-5, H1 pakai 1-1
+INDUCEMENT_ZONE_HI = 0.55 # inducement dicari di pita 0-61% range BOS besar (dekat puncak/lembah)
+INDUCEMENT_TF    = "60"    # timeframe cari inducement: "5"=M5, "60"=H1
+INDUCEMENT_SWING = 1      # ukuran swing bos kecil: M5 pakai 5-5, H1 pakai 1-1
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 
     'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
     'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
     'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
