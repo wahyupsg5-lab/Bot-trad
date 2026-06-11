@@ -81,8 +81,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
-RISK_PCT         = 0.02   # risk per trade = 3% dari total equity
-LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+RISK_PCT         = 0.03   # risk per trade = 3% dari total equity
+LEVERAGE         = 50     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
