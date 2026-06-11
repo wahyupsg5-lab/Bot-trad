@@ -104,7 +104,7 @@ REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candl
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT',
     'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
     'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
     'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
