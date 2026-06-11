@@ -92,23 +92,24 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.5    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
-INDUCEMENT_ZONE_HI = 0.55 # inducement dicari di pita 0-61% range BOS besar (dekat puncak/lembah)
-INDUCEMENT_TF    = "60"    # timeframe cari inducement: "5"=M5, "60"=H1
-INDUCEMENT_SWING = 1      # ukuran swing bos kecil: M5 pakai 5-5, H1 pakai 1-1
+INDUCEMENT_ZONE_LO = 0.30 # titik trigger IDM dicari mulai 30% range BOS besar (dari puncak/lembah)
+INDUCEMENT_ZONE_HI = 0.55 # ...sampai 55% range. (<30% sering belum reversal)
+INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
+INDUCEMENT_SWING = 1      # ukuran swing bos kecil: H1 pakai 1-1, M5 pakai 5-5
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
     'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
     'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
     'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
@@ -191,6 +192,7 @@ SESSION_FILTER: dict = {
 
 pending          = {}
 active_positions = {}
+inducement_done  = {}   # coin -> signature struktur BOS besar yg sudah di-entry inducement (anti entry-ulang)
 instrument_cache = {}
 done_setups      = {}   # coin -> {swing_val, stype, used_ocl} — cegah re-entry di BOS yang sama
 
@@ -824,10 +826,11 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         if not a:
             continue
         B = a['B']; rng = a['bos_rng']
+        # pita TITIK TRIGGER = 30-55% range BOS besar (dari puncak/lembah ke arah choch)
         if stype == "Long":
-            band_lo, band_hi = B - INDUCEMENT_ZONE_HI * rng, B
+            band_lo, band_hi = B - INDUCEMENT_ZONE_HI * rng, B - INDUCEMENT_ZONE_LO * rng
         else:
-            band_lo, band_hi = B, B + INDUCEMENT_ZONE_HI * rng
+            band_lo, band_hi = B + INDUCEMENT_ZONE_LO * rng, B + INDUCEMENT_ZONE_HI * rng
         # TF inducement: reuse H1 yang sudah ada, atau fetch TF lain (mis. M5)
         df_tf = df_h1 if INDUCEMENT_TF == "60" else get_data(coin, INDUCEMENT_TF, limit=200)
         prot, prot_idx = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
@@ -846,6 +849,12 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue                       # IDM belum disapu -> dimonitor, belum entry
         if breaches[0] != last_closed_idx:
             continue                       # sudah disapu sebelumnya -> jangan entry (anti-spam redeploy)
+        # ANTI ENTRY-ULANG: 1 entry inducement per struktur BOS besar.
+        # Walau posisi sebelumnya sudah loss/tutup, struktur yang sama tak di-entry lagi
+        # sampai BOS besar berubah (choch/swing baru).
+        sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
+        if inducement_done.get(coin) == sig:
+            continue
         # sapuan BARU di candle closed terakhir -> entry
         if stype == "Long":
             side, e_stype = "Sell", "Short"
@@ -870,6 +879,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 'orig_ocl': curr, 'choch_level': a['choch_level'], 'peak_val': a['peak_val'],
                 'swing2': a['peak_val'], 'kind': 'inducement',
             }
+            inducement_done[coin] = sig   # tandai struktur ini sudah di-entry (anti entry-ulang)
             if coin in pending:   # one-way mode: batalkan limit FVG yg pending utk koin ini
                 for d, st in list(pending[coin].items()):
                     if st.get('order_id'):
@@ -1233,20 +1243,20 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
     def _in_band(v):
         return band_lo <= v <= band_hi
     if big_stype == "Long":
-        # micro BOS long: swing high n-n yang ditembus naik, high-nya di pita
-        broken = [s for s in sh_tf if _in_band(s['val']) and
+        # micro BOS long: swing high n-n ditembus naik, high-nya di region 0-55% (>= band_lo)
+        broken = [s for s in sh_tf if s['val'] >= band_lo and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] > s['val']).any()]
         if not broken:
             return None, None
         micro = max(broken, key=lambda x: x['idx'])   # micro-BOS terbaru
-        # protective low = swing low n-n TERAKHIR sebelum micro-high, di pita
+        # protective low (TITIK TRIGGER) = swing low n-n TERAKHIR sebelum micro-high, di pita 30-55%
         lows = [s for s in sl_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
         if not lows:
             return None, None
         pl = max(lows, key=lambda x: x['idx'])
         return pl['val'], pl['idx']
     else:
-        broken = [s for s in sl_tf if _in_band(s['val']) and
+        broken = [s for s in sl_tf if s['val'] <= band_hi and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] < s['val']).any()]
         if not broken:
             return None, None
@@ -1570,13 +1580,13 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v8.3 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v8.4 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
-          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d 0-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
+          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
