@@ -81,8 +81,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
-RISK_PCT         = 0.03   # risk per trade = 3% dari total equity
-LEVERAGE         = 50     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
+LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -98,13 +98,17 @@ SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
+INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
+INDUCEMENT_ZONE_HI = 0.61 # inducement dicari di pita 0-61% range BOS besar (dekat puncak/lembah)
+INDUCEMENT_TF    = "5"    # timeframe cari inducement: "5"=M5, "60"=H1
+INDUCEMENT_SWING = 5      # ukuran swing bos kecil: M5 pakai 5-5, H1 pakai 1-1
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT',
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
     'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
     'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
     'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
@@ -760,6 +764,112 @@ def place_limit_order(symbol, side, entry_p, sl_p):
         return None
 
 
+def place_market_entry(coin, side, curr_price, sl_p, tp_p):
+    """Entry MARKET (untuk inducement) dgn SL+TP langsung. Sizing by risk. Return (order_id, qty) atau (None,None)."""
+    try:
+        info = get_instrument_info(coin)
+        res_bal = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        acct = res_bal['result']['list'][0]
+        balance = float(acct['totalEquity'])
+        avail   = float(acct.get('totalAvailableBalance') or balance)
+        risk_usd = balance * RISK_PCT
+        dist = abs(curr_price - sl_p)
+        if dist <= 0: return None, None
+        min_dist = curr_price * 0.002
+        if dist < min_dist:
+            dist = min_dist
+            sl_p = curr_price - dist if side == "Buy" else curr_price + dist
+        qty = round_qty(risk_usd / dist, info['qty_step'])
+        if qty < info['min_qty']:
+            print(f"⚠️ {coin}: induce qty {qty} < min {info['min_qty']}, skip."); return None, None
+        if qty * curr_price < MIN_ORDER_USD:
+            if qty * curr_price >= ORDER_BUMP_FLOOR:
+                qty = round_qty(MIN_ORDER_USD / curr_price, info['qty_step'])
+                if qty * curr_price < MIN_ORDER_USD:
+                    qty = round_qty(qty + info['qty_step'], info['qty_step'])
+            else:
+                print(f"⚠️ {coin}: induce order ~${qty*curr_price:.2f} terlalu kecil, skip."); return None, None
+        lev_int = int(min(LEVERAGE, float(info.get('max_leverage', 10))))
+        try:
+            session.set_leverage(category=CATEGORY, symbol=coin, buyLeverage=str(lev_int), sellLeverage=str(lev_int))
+        except Exception as e:
+            if '110043' not in str(e): print(f"   ⚠️ {coin}: set_leverage: {e}")
+        required_margin = (qty * curr_price) / lev_int
+        if required_margin > avail * 0.85:
+            print(f"⚠️ {coin}: induce margin ~${required_margin:.2f} > avail ${avail:.2f}, skip."); return None, None
+        tick = info['tick_size']
+        sl_r = round_price(sl_p, tick); tp_r = round_price(tp_p, tick)
+        res = session.place_order(category=CATEGORY, symbol=coin, side=side,
+                                  orderType="Market", qty=str(qty),
+                                  stopLoss=str(sl_r), takeProfit=str(tp_r),
+                                  positionIdx=0, timeInForce="IOC")
+        if res['retCode'] == 0:
+            print(f"   induce filled: qty {qty} SL {sl_r} TP {tp_r} (margin ~${required_margin:.2f}, risk ${risk_usd:.2f})")
+            return res['result']['orderId'], qty
+        print(f"⚠️ {coin}: induce order ditolak → {res.get('retMsg','')} (code:{res['retCode']})")
+        return None, None
+    except Exception as e:
+        print(f"⚠️ {coin}: place_market_entry error → {e}")
+        return None, None
+
+
+def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
+    """Inducement entry (market, KEBALIK arah BOS besar). Berdampingan dgn limit FVG.
+    BOS besar Long: inducement long 1-1 di pita 0-61% (dekat puncak); low-nya disapu M5 -> entry SHORT.
+    BOS besar Short: cerminannya -> entry LONG. SL = 10% range BOS besar, TP 1:RR_TP."""
+    if not INDUCEMENT_ENTRY or coin in active_positions:
+        return False
+    for stype in ("Long", "Short"):
+        a = bos_anchors(df_h1, sh_h1, sl_h1, stype)
+        if not a:
+            continue
+        B = a['B']; rng = a['bos_rng']
+        if stype == "Long":
+            band_lo, band_hi = B - INDUCEMENT_ZONE_HI * rng, B
+        else:
+            band_lo, band_hi = B, B + INDUCEMENT_ZONE_HI * rng
+        # TF inducement: reuse H1 yang sudah ada, atau fetch TF lain (mis. M5)
+        df_tf = df_h1 if INDUCEMENT_TF == "60" else get_data(coin, INDUCEMENT_TF, limit=200)
+        prot = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
+        if prot is None:
+            continue
+        last = df_tf.iloc[-2]   # candle TF CLOSED terakhir
+        if stype == "Long":
+            swept = float(last['low']) < prot          # low inducement disapu wick
+            side, e_stype = "Sell", "Short"
+        else:
+            swept = float(last['high']) > prot
+            side, e_stype = "Buy", "Long"
+        if not swept:
+            continue
+        curr = float(df_tf.iloc[-1]['close'])
+        sl_dist = SL_CAP_RANGE * rng
+        if e_stype == "Short":
+            sl_p, tp_p = curr + sl_dist, curr - RR_TP * sl_dist
+        else:
+            sl_p, tp_p = curr - sl_dist, curr + RR_TP * sl_dist
+        print(f"🎯 {coin}: INDUCEMENT {stype} disapu (level {prot:.6g}, pita {band_lo:.6g}-{band_hi:.6g}) "
+              f"→ entry {e_stype} MARKET @ ~{curr:.6g} | SL {sl_p:.6g} (10% range) TP {tp_p:.6g} (1:{RR_TP})")
+        oid, qty = place_market_entry(coin, side, curr, sl_p, tp_p)
+        if oid:
+            active_positions[coin] = {
+                'side': side, 'entry': curr, 'sl': sl_p, 'dist': abs(curr - sl_p),
+                'trail_dist': 0, 'trail_engaged': False, 'trail_set': True,
+                'last_price': curr, 'entry_time': time.time(),
+                'peak': curr, 'peak_time': time.time(),
+                'swing_val': a['swing_val'], 'bos_type': e_stype, 'rev_count': 0,
+                'orig_ocl': curr, 'choch_level': a['choch_level'], 'peak_val': a['peak_val'],
+                'swing2': a['peak_val'], 'kind': 'inducement',
+            }
+            if coin in pending:   # one-way mode: batalkan limit FVG yg pending utk koin ini
+                for d, st in list(pending[coin].items()):
+                    if st.get('order_id'):
+                        cancel_order(coin, st['order_id'])
+                pending.pop(coin, None)
+            return True
+    return False
+
+
 def cancel_order(symbol, order_id):
     """Batalkan pending order di Bybit."""
     try:
@@ -1051,6 +1161,92 @@ def reconstruct_state():
 # BOS H1 -> FVG -> Limit entry @ C1.close -> SL C1 invalidation -> Trailing
 # ============================================================
 
+def pick_bos_swing(df, sh_h1, sl_h1, stype):
+    """Pilih swing-1 BOS: swing 5-5 terbaru yang di-break & menghasilkan struktur LENGKAP (choch 5-5 sah).
+    Return (swing_val, brk_idx) atau (None, None)."""
+    idx_arr = df.index; closes = df['close']
+    up = (stype == "Long")
+    swings = sh_h1 if up else sl_h1
+    def _broken(s):
+        later = closes[idx_arr > s['idx']]
+        if len(later) == 0: return False
+        return bool((later > s['val']).any()) if up else bool((later < s['val']).any())
+    cands = sorted([s for s in swings[-8:] if _broken(s)], key=lambda x: x['idx'], reverse=True)
+    for s in cands:
+        bi, ch, pk = impulse_anchors(stype, s['val'], s['idx'], sh_h1, sl_h1, df)
+        if bi is not None and ch is not None:
+            return s['val'], s['idx']
+    if cands:
+        return cands[0]['val'], cands[0]['idx']
+    return None, None
+
+
+def bos_anchors(df, sh_h1, sl_h1, stype):
+    """Struktur BOS besar (tanpa perlu FVG) untuk arah `stype`.
+    Return dict {swing_val, brk_idx, choch_level, peak_val, B, bos_idx, bos_rng} atau None bila tak ada/invalid."""
+    if not sh_h1 or not sl_h1:
+        return None
+    swing_val, brk_idx = pick_bos_swing(df, sh_h1, sl_h1, stype)
+    if swing_val is None:
+        return None
+    bos_idx, choch_level, peak_val = impulse_anchors(stype, swing_val, brk_idx, sh_h1, sl_h1, df)
+    if bos_idx is None or choch_level is None:
+        return None
+    if stype == "Long":
+        sub = df['high'].iloc[bos_idx:]; B = float(sub.max())
+    else:
+        sub = df['low'].iloc[bos_idx:];  B = float(sub.min())
+    bos_rng = (B - choch_level) if stype == "Long" else (choch_level - B)
+    if bos_rng <= 0:
+        return None
+    # invalidasi: choch ditembus historis ATAU rebreak swing-2
+    if choch_is_broken(df, bos_idx, choch_level, stype):
+        return None
+    if REBREAK_INVALID and peak_val is not None and \
+       rebreak_invalid(df, bos_idx, peak_val, choch_level, stype, RETRACE_LOCK):
+        return None
+    return {'swing_val': swing_val, 'brk_idx': brk_idx, 'choch_level': choch_level,
+            'peak_val': peak_val, 'B': B, 'bos_idx': bos_idx, 'bos_rng': bos_rng}
+
+
+def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
+    """Cari inducement = BOS kecil SEARAH big_stype (swing n-n) di df_tf, di dalam pita harga [band_lo, band_hi]
+    (= zona 0-61% dekat puncak/lembah BOS besar). Return level pelindung inducement:
+      - big Long  -> protective LOW  (low yang bila disapu = inducement long gagal)
+      - big Short -> protective HIGH (high yang bila disapu = inducement short gagal)
+    atau None bila tak ada inducement valid."""
+    if df_tf is None or len(df_tf) < (2 * n + 1):
+        return None
+    sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n
+    if not sh_tf or not sl_tf:
+        return None
+    closes = df_tf['close']; idx_arr = df_tf.index
+    def _in_band(v):
+        return band_lo <= v <= band_hi
+    if big_stype == "Long":
+        # micro BOS long: swing high n-n yang ditembus naik, high-nya di pita
+        broken = [s for s in sh_tf if _in_band(s['val']) and
+                  len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] > s['val']).any()]
+        if not broken:
+            return None
+        micro = max(broken, key=lambda x: x['idx'])   # micro-BOS terbaru
+        # protective low = swing low n-n TERAKHIR sebelum micro-high, di pita
+        lows = [s for s in sl_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
+        if not lows:
+            return None
+        return max(lows, key=lambda x: x['idx'])['val']
+    else:
+        broken = [s for s in sl_tf if _in_band(s['val']) and
+                  len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] < s['val']).any()]
+        if not broken:
+            return None
+        micro = max(broken, key=lambda x: x['idx'])
+        highs = [s for s in sh_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
+        if not highs:
+            return None
+        return min(highs, key=lambda x: x['idx'])['val']
+
+
 def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
     """Deteksi BOS H1 terbaru -> FVG -> bangun setup WAIT_APPROACH.
     force_dir='Long'/'Short' => deteksi HANYA arah itu (untuk monitoring dua arah).
@@ -1058,30 +1254,11 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     if not sh_h1 or not sl_h1:
         return None, None
     is_long = False; is_short = False; swing_val = None; brk_idx = None
-    idx_arr = df_h1_live.index
-    closes  = df_h1_live['close']
-    # BOS = swing yang SUDAH ditembus candle SETELAHNYA (historis), bukan cuma candle terakhir.
-    def _broken(s, up):
-        later = closes[idx_arr > s['idx']]
-        if len(later) == 0: return False
-        return bool((later > s['val']).any()) if up else bool((later < s['val']).any())
-    def _pick(st, swings, up):
-        # kandidat = swing 5-5 yang sudah di-break, urut TERBARU dulu
-        cands = sorted([s for s in swings[-8:] if _broken(s, up)], key=lambda x: x['idx'], reverse=True)
-        # PRIORITAS: swing terbaru yang menghasilkan STRUKTUR LENGKAP (choch 5-5 sah).
-        # Swing kecil tanpa choch dilewati; turun ke swing 5-5 lebih signifikan yang punya choch.
-        for s in cands:
-            bi, ch, pk = impulse_anchors(st, s['val'], s['idx'], sh_h1, sl_h1, df_h1_live)
-            if bi is not None and ch is not None:
-                return s['val'], s['idx']
-        if cands:  # tak ada yang lengkap -> kembalikan terbaru (biar diagnostik muncul)
-            return cands[0]['val'], cands[0]['idx']
-        return None, None
     if force_dir in (None, "Long"):
-        sv, bi = _pick("Long", sh_h1, True)
+        sv, bi = pick_bos_swing(df_h1_live, sh_h1, sl_h1, "Long")
         if sv is not None: is_long = True; swing_val = sv; brk_idx = bi
     if force_dir in (None, "Short"):
-        sv, bi = _pick("Short", sl_h1, False)
+        sv, bi = pick_bos_swing(df_h1_live, sh_h1, sl_h1, "Short")
         if sv is not None: is_short = True; swing_val = sv; brk_idx = bi
     if not (is_long or is_short):
         if verbose: print(f"   {coin}: tidak ada BOS {force_dir or 'H1'}")
@@ -1382,13 +1559,13 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v8.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
-          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
+          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d 0-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -1440,6 +1617,10 @@ def run_bot():
                 sh_h1, sl_h1 = find_last_swing_bos(df_h1_live)
                 closed_h1 = df_h1_live.iloc[-2]
                 curr_h1   = df_h1_live.iloc[-1]
+
+                # ── INDUCEMENT ENTRY (market, kebalik arah; berdampingan dgn limit FVG) ──
+                if INDUCEMENT_ENTRY and check_inducement_entry(coin, df_h1_live, sh_h1, sl_h1):
+                    continue   # posisi inducement terbuka, koin terkunci
 
                 # ── PROSES SETUP PENDING (per arah) ──────────────────
                 if coin in pending:
