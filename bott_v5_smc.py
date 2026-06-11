@@ -830,18 +830,27 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             band_lo, band_hi = B, B + INDUCEMENT_ZONE_HI * rng
         # TF inducement: reuse H1 yang sudah ada, atau fetch TF lain (mis. M5)
         df_tf = df_h1 if INDUCEMENT_TF == "60" else get_data(coin, INDUCEMENT_TF, limit=200)
-        prot = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
+        prot, prot_idx = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
         if prot is None:
             continue
-        last = df_tf.iloc[-2]   # candle TF CLOSED terakhir
+        # Sapuan = candle SETELAH IDM yang menembus level pelindung.
+        # Entry HANYA bila sapuan PERTAMA terjadi di candle CLOSED TERAKHIR (sapuan baru).
+        # Kalau sudah disapu sebelumnya (mis. saat redeploy) -> SKIP (jangan market order).
+        seg = df_tf.iloc[prot_idx + 1:]
         if stype == "Long":
-            swept = float(last['low']) < prot          # low inducement disapu wick
+            breaches = seg.index[seg['low'] < prot]
+        else:
+            breaches = seg.index[seg['high'] > prot]
+        last_closed_idx = df_tf.index[-2]
+        if len(breaches) == 0:
+            continue                       # IDM belum disapu -> dimonitor, belum entry
+        if breaches[0] != last_closed_idx:
+            continue                       # sudah disapu sebelumnya -> jangan entry (anti-spam redeploy)
+        # sapuan BARU di candle closed terakhir -> entry
+        if stype == "Long":
             side, e_stype = "Sell", "Short"
         else:
-            swept = float(last['high']) > prot
             side, e_stype = "Buy", "Long"
-        if not swept:
-            continue
         curr = float(df_tf.iloc[-1]['close'])
         sl_dist = SL_CAP_RANGE * rng
         if e_stype == "Short":
@@ -1216,10 +1225,10 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
       - big Short -> protective HIGH (high yang bila disapu = inducement short gagal)
     atau None bila tak ada inducement valid."""
     if df_tf is None or len(df_tf) < (2 * n + 1):
-        return None
+        return None, None
     sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n
     if not sh_tf or not sl_tf:
-        return None
+        return None, None
     closes = df_tf['close']; idx_arr = df_tf.index
     def _in_band(v):
         return band_lo <= v <= band_hi
@@ -1228,23 +1237,25 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
         broken = [s for s in sh_tf if _in_band(s['val']) and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] > s['val']).any()]
         if not broken:
-            return None
+            return None, None
         micro = max(broken, key=lambda x: x['idx'])   # micro-BOS terbaru
         # protective low = swing low n-n TERAKHIR sebelum micro-high, di pita
         lows = [s for s in sl_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
         if not lows:
-            return None
-        return max(lows, key=lambda x: x['idx'])['val']
+            return None, None
+        pl = max(lows, key=lambda x: x['idx'])
+        return pl['val'], pl['idx']
     else:
         broken = [s for s in sl_tf if _in_band(s['val']) and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] < s['val']).any()]
         if not broken:
-            return None
+            return None, None
         micro = max(broken, key=lambda x: x['idx'])
         highs = [s for s in sh_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
         if not highs:
-            return None
-        return min(highs, key=lambda x: x['idx'])['val']
+            return None, None
+        ph = min(highs, key=lambda x: x['idx'])
+        return ph['val'], ph['idx']
 
 
 def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
@@ -1559,7 +1570,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v8.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v8.3 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
