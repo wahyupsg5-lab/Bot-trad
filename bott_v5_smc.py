@@ -82,7 +82,7 @@ TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari 
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
 RISK_PCT         = 0.02   # risk per trade = 3% dari total equity
-LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -92,10 +92,11 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.5    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # cap jarak entry->SL maksimal 10% range BOS (0 = nonaktif; floor Bybit tetap menang)
+SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
+SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
@@ -103,7 +104,7 @@ REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candl
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
     'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
     'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
     'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
@@ -1191,15 +1192,18 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         _allowed = SESSION_FILTER.get(coin)
         if _allowed is not None and _sesi not in _allowed:
             return None, None
-    # Cap SL: jarak entry->SL maksimal SL_CAP_RANGE × range BOS (_B/bos_rng sudah dihitung di atas)
-    if SL_CAP_RANGE > 0 and bos_rng > 0 and dist > SL_CAP_RANGE * bos_rng:
+    # SL: mode FIXED 10% range BOS (di setiap situasi), atau ikut C1 dengan cap 10% range
+    if SL_FIXED_RANGE and bos_rng > 0:
         dist = SL_CAP_RANGE * bos_rng
-        sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
-    # Floor Bybit: kalau dist kepecil, perbesar (boleh > 10% range)
-    min_d = c1_c * 0.002
+        sl_entry = entry_adj - dist if stype == 'Long' else entry_adj + dist
+    elif SL_CAP_RANGE > 0 and bos_rng > 0 and dist > SL_CAP_RANGE * bos_rng:
+        dist = SL_CAP_RANGE * bos_rng
+        sl_entry = entry_adj - dist if stype == 'Long' else entry_adj + dist
+    # Floor Bybit: kalau dist kepecil, perbesar (jaga-jaga range BOS sangat sempit)
+    min_d = entry_adj * 0.002
     if dist < min_d:
         if MIN_DIST_FLOOR:
-            dist = min_d; sl_entry = c1_c - dist if stype == 'Long' else c1_c + dist
+            dist = min_d; sl_entry = entry_adj - dist if stype == 'Long' else entry_adj + dist
         else:
             return None, None
     # (guard done_setups dihapus — anti-retrade kini lewat REQUIRE_FRESH_C1)
@@ -1378,10 +1382,10 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v7.8 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v7.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
-          f"SL cap {('%.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'off'} | "
+          f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
