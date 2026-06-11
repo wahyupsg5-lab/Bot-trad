@@ -11,6 +11,18 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # LOG SERVER — akses via https://xxx.up.railway.app/logs
 # ============================================================
 LOG_FILE = "bot.log"
+ENTRY_FILE = "entries.log"   # khusus catatan entry — TIDAK tergulung oleh log monitoring
+
+def log_entry(text):
+    """Catat entry ke entries.log (permanen, tak tergulung) DAN ke /logs."""
+    import datetime
+    ts = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=7)).strftime('[%Y-%m-%d %H:%M:%S] ')
+    try:
+        with open(ENTRY_FILE, 'a', encoding='utf-8') as f:
+            f.write(ts + text.replace('\n', '\n' + ' ' * len(ts)) + '\n')
+    except Exception:
+        pass
+    print(text)   # juga muncul di /logs
 
 class _Tee:
     """Redirect print() ke stdout DAN file sekaligus, dengan timestamp WIB per baris."""
@@ -38,6 +50,17 @@ sys.stdout = _Tee()
 
 class _LogHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ('/entries', '/entries?'):
+            try:
+                with open(ENTRY_FILE, 'r', encoding='utf-8') as f:
+                    data = f.read().encode('utf-8')
+            except Exception:
+                data = b'(belum ada entry)'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data); return
         if self.path not in ('/logs', '/logs?'):
             self.send_response(404); self.end_headers(); return
         try:
@@ -833,12 +856,12 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             band_lo, band_hi = B + INDUCEMENT_ZONE_LO * rng, B + INDUCEMENT_ZONE_HI * rng
         # TF inducement: reuse H1 yang sudah ada, atau fetch TF lain (mis. M5)
         df_tf = df_h1 if INDUCEMENT_TF == "60" else get_data(coin, INDUCEMENT_TF, limit=200)
-        prot, prot_idx = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
-        if prot is None:
+        idm = find_inducement(df_tf, stype, band_lo, band_hi, n=INDUCEMENT_SWING)
+        if idm is None:
             continue
+        prot, prot_idx = idm['prot'], idm['prot_idx']
         # Sapuan = candle SETELAH IDM yang menembus level pelindung.
         # Entry HANYA bila sapuan PERTAMA terjadi di candle CLOSED TERAKHIR (sapuan baru).
-        # Kalau sudah disapu sebelumnya (mis. saat redeploy) -> SKIP (jangan market order).
         seg = df_tf.iloc[prot_idx + 1:]
         if stype == "Long":
             breaches = seg.index[seg['low'] < prot]
@@ -849,18 +872,15 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue                       # IDM belum disapu -> dimonitor, belum entry
         if breaches[0] != last_closed_idx:
             continue                       # sudah disapu sebelumnya -> jangan entry (anti-spam redeploy)
-        # ANTI ENTRY-ULANG: 1 entry inducement per struktur BOS besar.
-        # Walau posisi sebelumnya sudah loss/tutup, struktur yang sama tak di-entry lagi
-        # sampai BOS besar berubah (choch/swing baru).
         sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
         if inducement_done.get(coin) == sig:
-            continue
-        # sapuan BARU di candle closed terakhir -> entry
+            continue                       # struktur ini sudah pernah di-entry -> jangan ulang
         if stype == "Long":
             side, e_stype = "Sell", "Short"
         else:
             side, e_stype = "Buy", "Long"
         curr = float(df_tf.iloc[-1]['close'])
+        trig = df_tf.iloc[-2]              # candle yg menyapu (closed terakhir)
         sl_dist = SL_CAP_RANGE * rng
         if e_stype == "Short":
             sl_p, tp_p = curr + sl_dist, curr - RR_TP * sl_dist
@@ -880,6 +900,19 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 'swing2': a['peak_val'], 'kind': 'inducement',
             }
             inducement_done[coin] = sig   # tandai struktur ini sudah di-entry (anti entry-ulang)
+            rec = (
+                f"════ ENTRY INDUCEMENT ════\n"
+                f"  {coin} | entry {e_stype} MARKET @ ~{curr:.6g} qty {qty}\n"
+                f"  BOS BESAR ({stype}): swing-1(break)={a['swing_val']:.6g} | choch={a['choch_level']:.6g} | "
+                f"swing-2(puncak/lembah)={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} | range={rng:.6g}\n"
+                f"  BOS KECIL (induce {INDUCEMENT_TF} {INDUCEMENT_SWING}-{INDUCEMENT_SWING}): "
+                f"micro-BOS={idm['micro_val']:.6g}@{idm['micro_idx']} | "
+                f"level-pelindung(IDM)={prot:.6g}@{prot_idx} | pita30-55%={band_lo:.6g}-{band_hi:.6g}\n"
+                f"  TRIGGER: candle ts={int(trig['ts'])} low={float(trig['low']):.6g} high={float(trig['high']):.6g} "
+                f"close={float(trig['close']):.6g} (menyapu {prot:.6g})\n"
+                f"  SL={sl_p:.6g} (10% range) | TP={tp_p:.6g} (1:{RR_TP})"
+            )
+            log_entry(rec)
             if coin in pending:   # one-way mode: batalkan limit FVG yg pending utk koin ini
                 for d, st in list(pending[coin].items()):
                     if st.get('order_id'):
@@ -1235,10 +1268,10 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
       - big Short -> protective HIGH (high yang bila disapu = inducement short gagal)
     atau None bila tak ada inducement valid."""
     if df_tf is None or len(df_tf) < (2 * n + 1):
-        return None, None
+        return None
     sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n
     if not sh_tf or not sl_tf:
-        return None, None
+        return None
     closes = df_tf['close']; idx_arr = df_tf.index
     def _in_band(v):
         return band_lo <= v <= band_hi
@@ -1247,25 +1280,25 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5):
         broken = [s for s in sh_tf if s['val'] >= band_lo and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] > s['val']).any()]
         if not broken:
-            return None, None
+            return None
         micro = max(broken, key=lambda x: x['idx'])   # micro-BOS terbaru
         # protective low (TITIK TRIGGER) = swing low n-n TERAKHIR sebelum micro-high, di pita 30-55%
         lows = [s for s in sl_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
         if not lows:
-            return None, None
+            return None
         pl = max(lows, key=lambda x: x['idx'])
-        return pl['val'], pl['idx']
+        return {'prot': pl['val'], 'prot_idx': pl['idx'], 'micro_val': micro['val'], 'micro_idx': micro['idx']}
     else:
         broken = [s for s in sl_tf if s['val'] <= band_hi and
                   len(closes[idx_arr > s['idx']]) and (closes[idx_arr > s['idx']] < s['val']).any()]
         if not broken:
-            return None, None
+            return None
         micro = max(broken, key=lambda x: x['idx'])
         highs = [s for s in sh_tf if s['idx'] < micro['idx'] and _in_band(s['val'])]
         if not highs:
-            return None, None
+            return None
         ph = min(highs, key=lambda x: x['idx'])
-        return ph['val'], ph['idx']
+        return {'prot': ph['val'], 'prot_idx': ph['idx'], 'micro_val': micro['val'], 'micro_idx': micro['idx']}
 
 
 def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
@@ -1580,7 +1613,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v8.4 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v8.5 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
