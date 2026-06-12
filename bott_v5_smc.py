@@ -914,8 +914,8 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 f"  BOS BESAR ({stype}): swing-1(break)={a['swing_val']:.6g} | choch={a['choch_level']:.6g} | "
                 f"swing-2(puncak/lembah)={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} | range={rng:.6g}\n"
                 f"  BOS KECIL (induce {INDUCEMENT_TF} {INDUCEMENT_SWING}-{INDUCEMENT_SWING}, dari choch→puncak): "
-                f"micro-BOS={idm['micro_val']:.6g}@{idm['micro_idx']} | "
-                f"level-pelindung(IDM)={prot:.6g}@{idm['prot_idx']} | pita35-55%={band_lo:.6g}-{band_hi:.6g}\n"
+                f"swing-1={idm['micro_val']:.6g}@{idm['micro_idx']} | "
+                f"choch-TRIGGER={prot:.6g}@{idm['prot_idx']} (di antara swing-1 & swing-2) | pita35-55%={band_lo:.6g}-{band_hi:.6g}\n"
                 f"  TRIGGER(M5 close): ts={int(trig['ts'])} low={float(trig['low']):.6g} high={float(trig['high']):.6g} "
                 f"close={float(trig['close']):.6g} (menyapu IDM {prot:.6g})\n"
                 f"  SL={sl_p:.6g} (10% range) | TP={tp_p:.6g} (1:{RR_TP})"
@@ -1241,41 +1241,69 @@ def pick_bos_swing(df, sh_h1, sl_h1, stype):
     return None, None
 
 
-def apply_latest_leg(df, sh_h1, sl_h1, stype, swing_val, brk_idx, choch_level, peak_val, B, peak_idx, bos_idx):
-    """Aturan LEG TERBARU (extension vs rebreak). Dipakai jalur inducement & FVG.
-    Kalau puncak mentah B melewati swing-2 5-5 (peak_val):
-      - retrace antara swing-2 & puncak baru < 50% -> EXTENSION (struktur tetap, puncak tumbuh ke B)
-      - retrace >= 50% -> REBREAK -> BOS baru (ada choch 5-5 di leg) ATAU None (tak ada BOS)
+def apply_latest_leg(df, sh, sl, stype, swing_val, brk_idx, choch_level, peak_val, B, peak_idx, bos_idx):
+    """FORWARD-CHAINING sub-puncak 5-5 -> choch & swing-2 selalu mengikuti LEG TERBARU,
+    ambang retrace 50% diukur PER-LEG (presisi). Telusuri tiap swing high(Long)/low(Short) 5-5
+    setelah swing-1 berurutan:
+      - high baru TANPA retrace>=50% leg saat ini -> EXTENSION (puncak tumbuh, choch tetap)
+      - high baru SETELAH retrace>=50%            -> REBREAK -> leg baru:
+            swing-1 = swing-2 lama, choch = protective low/high 5-5 TERBARU di leg baru, swing-2 = high baru
+            (kalau leg baru tak ada 5-5 -> None / tak ada BOS)
+    choch leg = protective swing 5-5 TERBARU (paling dekat puncak), bukan launch terdalam.
     Return (swing_val, brk_idx, choch_level, peak_val, bos_idx) atau None."""
-    if peak_val is None:
-        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)
-    exceeded = (B > peak_val) if stype == "Long" else (B < peak_val)
-    if not exceeded:
-        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)
-    pv = [x for x in sh_h1 if x['idx'] > brk_idx and x['val'] == peak_val] if stype == "Long" \
-         else [x for x in sl_h1 if x['idx'] > brk_idx and x['val'] == peak_val]
-    if not pv:
-        return None
-    pv_idx = max(pv, key=lambda x: x['idx'])['idx']
     if stype == "Long":
-        half = peak_val - RETRACE_LOCK * (peak_val - choch_level)
-        retraced = float(df['low'].iloc[pv_idx:peak_idx + 1].min()) <= half
+        peaks = sorted([x for x in sh if x['idx'] > brk_idx and x['val'] > swing_val], key=lambda x: x['idx'])
     else:
-        half = peak_val + RETRACE_LOCK * (choch_level - peak_val)
-        retraced = float(df['high'].iloc[pv_idx:peak_idx + 1].max()) >= half
-    if not retraced:
-        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)   # EXTENSION
-    if stype == "Long":                                               # REBREAK
-        cands = [x for x in sl_h1 if pv_idx <= x['idx'] < peak_idx]
-        if not cands:
-            return None
-        ch = min(cands, key=lambda x: x['val'])
-    else:
-        cands = [x for x in sh_h1 if pv_idx <= x['idx'] < peak_idx]
-        if not cands:
-            return None
-        ch = max(cands, key=lambda x: x['val'])
-    return (peak_val, pv_idx, ch['val'], None, ch['idx'])
+        peaks = sorted([x for x in sl if x['idx'] > brk_idx and x['val'] < swing_val], key=lambda x: x['idx'])
+    if not peaks:
+        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)
+
+    def prot_between(i_lo, i_hi):   # protective swing 5-5 TERBARU (idx terbesar) di (i_lo, i_hi)
+        if stype == "Long":
+            c = [x for x in sl if i_lo <= x['idx'] < i_hi]
+        else:
+            c = [x for x in sh if i_lo <= x['idx'] < i_hi]
+        return max(c, key=lambda x: x['idx']) if c else None
+
+    def retr(s2v, chv, i_from, i_to):   # apakah retrace >= RETRACE_LOCK leg [chv..s2v] terjadi di [i_from,i_to]
+        if stype == "Long":
+            half = s2v - RETRACE_LOCK * (s2v - chv)
+            return float(df['low'].iloc[i_from:i_to + 1].min()) <= half
+        else:
+            half = s2v + RETRACE_LOCK * (chv - s2v)
+            return float(df['high'].iloc[i_from:i_to + 1].max()) >= half
+
+    higher = (lambda a, b: a > b) if stype == "Long" else (lambda a, b: a < b)
+    # leg 0
+    ch0 = prot_between(brk_idx, peaks[0]['idx'])
+    cur_s1v, cur_s1i = swing_val, brk_idx
+    cur_chv, cur_chi = (ch0['val'], ch0['idx']) if ch0 else (choch_level, bos_idx)
+    cur_s2v, cur_s2i = peaks[0]['val'], peaks[0]['idx']
+    # chain sisa sub-puncak
+    for p in peaks[1:]:
+        if not higher(p['val'], cur_s2v):
+            continue
+        if retr(cur_s2v, cur_chv, cur_s2i, p['idx']):     # REBREAK
+            nch = prot_between(cur_s2i, p['idx'])
+            if nch is None:
+                return None
+            cur_s1v, cur_s1i = cur_s2v, cur_s2i
+            cur_chv, cur_chi = nch['val'], nch['idx']
+            cur_s2v, cur_s2i = p['val'], p['idx']
+        else:                                             # EXTENSION
+            cur_s2v, cur_s2i = p['val'], p['idx']
+    # puncak MENTAH B di luar sub-puncak 5-5 terakhir
+    final_peak_val = cur_s2v
+    if higher(B, cur_s2v):
+        if retr(cur_s2v, cur_chv, cur_s2i, peak_idx):     # REBREAK ke B
+            nch = prot_between(cur_s2i, peak_idx)
+            if nch is None:
+                return None
+            cur_s1v, cur_s1i = cur_s2v, cur_s2i
+            cur_chv, cur_chi = nch['val'], nch['idx']
+            final_peak_val = None     # puncak = B mentah (belum 5-5)
+        # else: EXTENSION ke B -> final_peak_val tetap cur_s2v
+    return (cur_s1v, cur_s1i, cur_chv, final_peak_val, cur_chi)
 
 
 def bos_anchors(df, sh_h1, sl_h1, stype):
@@ -1311,54 +1339,39 @@ def bos_anchors(df, sh_h1, sl_h1, stype):
             'peak_val': peak_val, 'B': B, 'bos_idx': bos_idx, 'peak_idx': peak_idx, 'bos_rng': bos_rng}
 
 
-def find_inducement(df_tf, big_stype, band_lo, band_hi, n=5, ts_lo=None, ts_hi=None):
-    """Cari inducement = BOS kecil SEARAH big_stype (swing n-n) di df_tf, di dalam:
-      - JENDELA WAKTU [ts_lo, ts_hi] = dari choch sampai PUNCAK (impuls), supaya tak ambil struktur setelah puncak.
-      - PITA HARGA [band_lo, band_hi] = 35-55% range BOS besar.
-    Return dict {prot, prot_idx, micro_val, micro_idx} (prot = level pelindung/TITIK TRIGGER) atau None."""
+def find_inducement(df_tf, big_stype, band_lo, band_hi, n=1, ts_lo=None, ts_hi=None):
+    """Inducement = MINI-BOS searah big_stype (swing n-n), dideteksi sama seperti BOS besar:
+      swing-1 (di-break) -> choch (di ANTARA swing-1 & swing-2) -> swing-2.
+    choch mini-BOS = TITIK TRIGGER (kalau disapu = inducement gagal -> entry lawan arah).
+    Syarat: mini-BOS di JENDELA impuls [ts_lo, ts_hi] (choch besar -> puncak besar),
+            dan choch (trigger) ada di PITA 35-55% range BOS besar.
+    Return {prot, prot_idx, micro_val, micro_idx} (prot=choch trigger, micro=swing-1) atau None."""
     if df_tf is None or len(df_tf) < (2 * n + 1):
         return None
     sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n
     if not sh_tf or not sl_tf:
         return None
-    closes = df_tf['close']; idx_arr = df_tf.index
     ts_col = df_tf['ts']
-    hi_cap = ts_hi if ts_hi is not None else 9e18
-    def _in_band(v):
-        return band_lo <= v <= band_hi
     def _in_win(idx):
         if ts_lo is None:
             return True
         t = float(ts_col.iloc[idx])
         return ts_lo <= t <= ts_hi
-    def _broke_up(s):   # micro-high ditembus naik oleh close SETELAHNYA & masih DI DALAM impuls (ts<=puncak)
-        mask = (idx_arr > s['idx']) & (ts_col <= hi_cap)
-        seg = closes[mask]
-        return len(seg) > 0 and bool((seg > s['val']).any())
-    def _broke_dn(s):
-        mask = (idx_arr > s['idx']) & (ts_col <= hi_cap)
-        seg = closes[mask]
-        return len(seg) > 0 and bool((seg < s['val']).any())
-    if big_stype == "Long":
-        broken = [s for s in sh_tf if _in_win(s['idx']) and s['val'] >= band_lo and _broke_up(s)]
-        if not broken:
-            return None
-        micro = max(broken, key=lambda x: x['idx'])
-        lows = [s for s in sl_tf if s['idx'] < micro['idx'] and _in_win(s['idx']) and _in_band(s['val'])]
-        if not lows:
-            return None
-        pl = max(lows, key=lambda x: x['idx'])
-        return {'prot': pl['val'], 'prot_idx': pl['idx'], 'micro_val': micro['val'], 'micro_idx': micro['idx']}
-    else:
-        broken = [s for s in sl_tf if _in_win(s['idx']) and s['val'] <= band_hi and _broke_dn(s)]
-        if not broken:
-            return None
-        micro = max(broken, key=lambda x: x['idx'])
-        highs = [s for s in sh_tf if s['idx'] < micro['idx'] and _in_win(s['idx']) and _in_band(s['val'])]
-        if not highs:
-            return None
-        ph = min(highs, key=lambda x: x['idx'])
-        return {'prot': ph['val'], 'prot_idx': ph['idx'], 'micro_val': micro['val'], 'micro_idx': micro['idx']}
+    shw = [s for s in sh_tf if _in_win(s['idx'])]
+    slw = [s for s in sl_tf if _in_win(s['idx'])]
+    if not shw or not slw:
+        return None
+    # mini-BOS searah: swing-1 = swing terbaru yg di-break & punya choch 1-1 (sama spt BOS besar)
+    sv, bi = pick_bos_swing(df_tf, shw, slw, big_stype)
+    if sv is None:
+        return None
+    m_bos_idx, m_choch, m_peak = impulse_anchors(big_stype, sv, bi, shw, slw, df_tf)
+    if m_bos_idx is None or m_choch is None:
+        return None
+    # TRIGGER = choch mini-BOS (antara swing-1 & swing-2). Wajib di pita 35-55% range BOS besar.
+    if not (band_lo <= m_choch <= band_hi):
+        return None
+    return {'prot': m_choch, 'prot_idx': m_bos_idx, 'micro_val': sv, 'micro_idx': bi}
 
 
 def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
@@ -1679,7 +1692,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v8.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.1 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
