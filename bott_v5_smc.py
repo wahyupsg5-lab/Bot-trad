@@ -1241,6 +1241,43 @@ def pick_bos_swing(df, sh_h1, sl_h1, stype):
     return None, None
 
 
+def apply_latest_leg(df, sh_h1, sl_h1, stype, swing_val, brk_idx, choch_level, peak_val, B, peak_idx, bos_idx):
+    """Aturan LEG TERBARU (extension vs rebreak). Dipakai jalur inducement & FVG.
+    Kalau puncak mentah B melewati swing-2 5-5 (peak_val):
+      - retrace antara swing-2 & puncak baru < 50% -> EXTENSION (struktur tetap, puncak tumbuh ke B)
+      - retrace >= 50% -> REBREAK -> BOS baru (ada choch 5-5 di leg) ATAU None (tak ada BOS)
+    Return (swing_val, brk_idx, choch_level, peak_val, bos_idx) atau None."""
+    if peak_val is None:
+        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)
+    exceeded = (B > peak_val) if stype == "Long" else (B < peak_val)
+    if not exceeded:
+        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)
+    pv = [x for x in sh_h1 if x['idx'] > brk_idx and x['val'] == peak_val] if stype == "Long" \
+         else [x for x in sl_h1 if x['idx'] > brk_idx and x['val'] == peak_val]
+    if not pv:
+        return None
+    pv_idx = max(pv, key=lambda x: x['idx'])['idx']
+    if stype == "Long":
+        half = peak_val - RETRACE_LOCK * (peak_val - choch_level)
+        retraced = float(df['low'].iloc[pv_idx:peak_idx + 1].min()) <= half
+    else:
+        half = peak_val + RETRACE_LOCK * (choch_level - peak_val)
+        retraced = float(df['high'].iloc[pv_idx:peak_idx + 1].max()) >= half
+    if not retraced:
+        return (swing_val, brk_idx, choch_level, peak_val, bos_idx)   # EXTENSION
+    if stype == "Long":                                               # REBREAK
+        cands = [x for x in sl_h1 if pv_idx <= x['idx'] < peak_idx]
+        if not cands:
+            return None
+        ch = min(cands, key=lambda x: x['val'])
+    else:
+        cands = [x for x in sh_h1 if pv_idx <= x['idx'] < peak_idx]
+        if not cands:
+            return None
+        ch = max(cands, key=lambda x: x['val'])
+    return (peak_val, pv_idx, ch['val'], None, ch['idx'])
+
+
 def bos_anchors(df, sh_h1, sl_h1, stype):
     """Struktur BOS besar (tanpa perlu FVG) untuk arah `stype`.
     Return dict {swing_val, brk_idx, choch_level, peak_val, B, bos_idx, bos_rng} atau None bila tak ada/invalid."""
@@ -1256,6 +1293,11 @@ def bos_anchors(df, sh_h1, sl_h1, stype):
         sub = df['high'].iloc[bos_idx:]; B = float(sub.max()); peak_idx = int(sub.idxmax())
     else:
         sub = df['low'].iloc[bos_idx:];  B = float(sub.min()); peak_idx = int(sub.idxmin())
+    # === ATURAN LEG TERBARU (extension vs rebreak) — bersama jalur FVG ===
+    res = apply_latest_leg(df, sh_h1, sl_h1, stype, swing_val, brk_idx, choch_level, peak_val, B, peak_idx, bos_idx)
+    if res is None:
+        return None
+    swing_val, brk_idx, choch_level, peak_val, bos_idx = res
     bos_rng = (B - choch_level) if stype == "Long" else (choch_level - B)
     if bos_rng <= 0:
         return None
@@ -1369,6 +1411,12 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         sub = df_h1_live['high'].iloc[bos_idx:]; _B = float(sub.max()); peak_idx = int(sub.idxmax())
     else:
         sub = df_h1_live['low'].iloc[bos_idx:]; _B = float(sub.min()); peak_idx = int(sub.idxmin())
+    # === ATURAN LEG TERBARU (extension vs rebreak) — sama dgn jalur inducement ===
+    res = apply_latest_leg(df_h1_live, sh_h1, sl_h1, stype, swing_val, brk_idx, choch_level, peak_val, _B, peak_idx, bos_idx)
+    if res is None:
+        if verbose: print(f"   {coin}: BOS {stype} — swing-2 ditembus & leg baru tanpa choch 5-5 (tunggu BOS baru)")
+        return None, None
+    swing_val, brk_idx, choch_level, peak_val, bos_idx = res
     bos_rng = (_B - choch_level) if stype == "Long" else (choch_level - _B)
     # CHoCH invalidation HISTORIS: kalau SETELAH puncak ada candle yang CLOSE menembus choch -> BOS mati
     # (walau harga sekarang sudah balik). Sebelumnya cuma cek close terakhir -> bocor.
@@ -1631,7 +1679,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v8.6 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v8.9 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
