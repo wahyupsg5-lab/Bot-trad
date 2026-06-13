@@ -48,32 +48,92 @@ class _Tee:
 
 sys.stdout = _Tee()
 
+LAST_OHLC = {}   # (symbol, interval) -> df OHLC terakhir (diunduh via /ohlc utk diagnostik)
+
 class _LogHandler(BaseHTTPRequestHandler):
+    def _send(self, body, ctype='text/plain; charset=utf-8', extra=None):
+        if isinstance(body, str):
+            body = body.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        if self.path in ('/entries', '/entries?'):
+        import datetime as _dt
+        path = self.path.split('?', 1)[0]
+        query = {}
+        if '?' in self.path:
+            for kv in self.path.split('?', 1)[1].split('&'):
+                if '=' in kv:
+                    k, v = kv.split('=', 1); query[k] = v
+
+        if path == '/entries':
             try:
                 with open(ENTRY_FILE, 'r', encoding='utf-8') as f:
-                    data = f.read().encode('utf-8')
+                    data = f.read()
             except Exception:
-                data = b'(belum ada entry)'
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(data); return
-        if self.path not in ('/logs', '/logs?'):
-            self.send_response(404); self.end_headers(); return
-        try:
-            with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            data = ''.join(lines[-200:]).encode('utf-8')
-        except:
-            data = b''
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(data)
+                data = '(belum ada entry)'
+            return self._send(data)
+
+        if path == '/logs':
+            try:
+                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                    data = ''.join(f.readlines()[-200:])
+            except Exception:
+                data = ''
+            return self._send(data)
+
+        # ---- Unduh OHLC (diagnostik): /ohlc (halaman tombol) atau /ohlc?symbol=X&tf=60 (CSV) ----
+        if path == '/ohlc':
+            sym = query.get('symbol'); tf = query.get('tf', '60')
+            if sym:   # unduh CSV
+                df = LAST_OHLC.get((sym, str(tf)))
+                if df is None:
+                    return self._send(f"(data {sym} tf{tf} belum ada — tunggu bot scan dulu)")
+                rows = ["ts_ms,waktu_WIB,open,high,low,close,volume"]
+                for _, r in df.iterrows():
+                    t = _dt.datetime.utcfromtimestamp(int(r['ts']) / 1000) + _dt.timedelta(hours=7)
+                    rows.append(f"{int(r['ts'])},{t:%Y-%m-%d %H:%M:%S},"
+                                f"{r['open']:.10g},{r['high']:.10g},{r['low']:.10g},{r['close']:.10g},{r.get('vol',0):.10g}")
+                csv = "\n".join(rows)
+                fname = f"{sym}_tf{tf}_{_dt.datetime.utcnow():%Y%m%d_%H%M}.csv"
+                return self._send(csv, 'text/csv; charset=utf-8',
+                                  {'Content-Disposition': f'attachment; filename="{fname}"'})
+            # halaman tombol
+            keys = sorted(LAST_OHLC.keys())
+            if not keys:
+                return self._send("<h3>Belum ada data. Tunggu bot scan beberapa detik lalu refresh.</h3>"
+                                  "<a href='/ohlc'>refresh</a>", 'text/html; charset=utf-8')
+            syms = sorted({k[0] for k in keys})
+            html = ["<html><head><meta charset='utf-8'><title>Unduh OHLC</title>",
+                    "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:16px}"
+                    "a.btn{display:inline-block;margin:3px;padding:6px 10px;background:#2a6;color:#fff;"
+                    "text-decoration:none;border-radius:5px}a.btn.m5{background:#26a}h4{margin:14px 0 4px}</style></head><body>",
+                    "<h2>Unduh OHLC (data yg dilihat bot)</h2>",
+                    "<p>Klik untuk unduh CSV (ts epoch + waktu WIB + OHLC). Kirim file-nya ke Claude untuk cek break/choch.</p>",
+                    "<p><a href='/logs'>/logs</a> · <a href='/entries'>/entries</a> · <a href='/ohlc'>refresh</a></p>"]
+            for s in syms:
+                html.append(f"<h4>{s}</h4>")
+                if (s, '60') in LAST_OHLC:
+                    html.append(f"<a class='btn' href='/ohlc?symbol={s}&tf=60'>⬇ H1 (60m)</a>")
+                if (s, '5') in LAST_OHLC:
+                    html.append(f"<a class='btn m5' href='/ohlc?symbol={s}&tf=5'>⬇ M5</a>")
+            html.append("</body></html>")
+            return self._send("\n".join(html), 'text/html; charset=utf-8')
+
+        if path == '/':
+            return self._send("<html><body style='font-family:sans-serif;background:#111;color:#eee;padding:16px'>"
+                              "<h2>SMC bot</h2><p><a href='/logs' style='color:#6cf'>/logs</a> · "
+                              "<a href='/entries' style='color:#6cf'>/entries</a> · "
+                              "<a href='/ohlc' style='color:#6cf'><b>/ohlc — unduh data OHLC</b></a></p></body></html>",
+                              'text/html; charset=utf-8')
+
+        self.send_response(404); self.end_headers()
+
     def log_message(self, *a):
         pass
 
@@ -239,7 +299,9 @@ def get_data(symbol, interval, limit=200):
             )
             df[['open','high','low','close','vol','turnover','ts']] = \
                 df[['open','high','low','close','vol','turnover','ts']].apply(pd.to_numeric)
-            return df.iloc[::-1].reset_index(drop=True)
+            df = df.iloc[::-1].reset_index(drop=True)
+            LAST_OHLC[(symbol, str(interval))] = df   # cache utk unduhan diagnostik
+            return df
         print(f"⚠️ get_data {symbol} {interval}: {res.get('retMsg','')}")
         return None
     except Exception as e:
@@ -1775,7 +1837,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.9 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.10 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
