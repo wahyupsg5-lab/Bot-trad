@@ -1299,26 +1299,22 @@ def apply_latest_leg(df, sh, sl, stype, swing_val, brk_idx, choch_level, peak_va
             return (float(s.max()), int(s.idxmax())) if len(s) else None
 
     higher = (lambda a, b: a > b) if stype == "Long" else (lambda a, b: a < b)
-    # leg 0
-    ch0 = prot_between(brk_idx, peaks[0]['idx'])
+    # leg 0: choch = choch DALAM (launch) dari impulse_anchors, BUKAN fine-low terbaru
     cur_s1v, cur_s1i = swing_val, brk_idx
-    cur_chv, cur_chi = (ch0['val'], ch0['idx']) if ch0 else (choch_level, bos_idx)
+    cur_chv, cur_chi = choch_level, bos_idx
     cur_s2v, cur_s2i = peaks[0]['val'], peaks[0]['idx']
     # chain sisa sub-puncak halus
     for p in peaks[1:]:
         if not higher(p['val'], cur_s2v):
             continue
-        if retr(cur_s2v, cur_chv, cur_s2i, p['idx']):     # REBREAK
+        if retr(cur_s2v, cur_chv, cur_s2i, p['idx']):     # REBREAK (retrace >=50% leg sebenarnya)
             rc = rebreak_choch(cur_s2i, p['idx'])
             if rc is None:
                 return None
             cur_s1v, cur_s1i = cur_s2v, cur_s2i
             cur_chv, cur_chi = rc
             cur_s2v, cur_s2i = p['val'], p['idx']
-        else:                                             # EXTENSION
-            nch = prot_between(cur_s2i, p['idx'])          # choch naik ke higher-low/lower-high HALUS terbaru
-            if nch is not None:
-                cur_chv, cur_chi = nch['val'], nch['idx']
+        else:                                             # EXTENSION: choch TETAP, cuma puncak tumbuh
             cur_s2v, cur_s2i = p['val'], p['idx']
     # puncak MENTAH B di luar sub-puncak halus terakhir
     final_peak_val = cur_s2v
@@ -1779,7 +1775,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.8 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.9 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
