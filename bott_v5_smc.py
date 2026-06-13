@@ -125,7 +125,9 @@ INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah 
 INDUCEMENT_ZONE_LO = 0.35 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
 INDUCEMENT_ZONE_HI = 0.55 # ...sampai 55% range. (<35% sering belum reversal)
 INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
-INDUCEMENT_SWING = 1      # ukuran swing bos kecil: H1 pakai 1-1, M5 pakai 5-5
+INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4-4 & asimetris otomatis)
+INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
+REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya IDM mini-BOS di dalamnya (lebih ketat)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
@@ -1361,7 +1363,26 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=1, ts_lo=None, ts_hi=N
     Return {prot, prot_idx, micro_val, micro_idx} (prot=choch trigger, micro=swing-1) atau None."""
     if df_tf is None or len(df_tf) < (2 * n + 1):
         return None
-    sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n
+    sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n (minimum)
+    if not sh_tf or not sl_tf:
+        return None
+    # BUANG swing skala BOS besar: kekuatan >= INDUCEMENT_SWING_MAX di KEDUA sisi (mis. 5-5+).
+    # IDM hanya boleh dari swing minor (1-1 s/d 4-4, asimetris spt 2-4 boleh; 5-3 boleh, 5-5 tidak).
+    hi_a = df_tf['high'].values; lo_a = df_tf['low'].values
+    cap = INDUCEMENT_SWING_MAX
+    def _too_big(idx, is_high):
+        arr = hi_a if is_high else lo_a
+        v = arr[idx]; L = 0; R = 0; k = 1
+        while idx - k >= 0 and ((arr[idx - k] < v) if is_high else (arr[idx - k] > v)):
+            L += 1; k += 1
+            if L >= cap: break
+        k = 1
+        while idx + k < len(arr) and ((arr[idx + k] < v) if is_high else (arr[idx + k] > v)):
+            R += 1; k += 1
+            if R >= cap: break
+        return L >= cap and R >= cap
+    sh_tf = [s for s in sh_tf if not _too_big(s['idx'], True)]
+    sl_tf = [s for s in sl_tf if not _too_big(s['idx'], False)]
     if not sh_tf or not sl_tf:
         return None
     ts_col = df_tf['ts']
@@ -1457,8 +1478,24 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
        rebreak_invalid(df_h1_live, bos_idx, peak_val, choch_level, stype, RETRACE_LOCK):
         if verbose: print(f"   {coin}: BOS {stype} INVALID — retrace>={RETRACE_LOCK*100:.0f}% lalu close lewati swing-2 {peak_val:.6g} (tunggu BOS baru)")
         return None, None
+    # === GATE: BOS besar WAJIB punya IDM mini-BOS di dalamnya (lebih ketat, simetris dgn jalur IDM) ===
+    if REQUIRE_IDM_FOR_FVG:
+        if stype == "Long":
+            ib_lo, ib_hi = _B - INDUCEMENT_ZONE_HI * bos_rng, _B - INDUCEMENT_ZONE_LO * bos_rng
+        else:
+            ib_lo, ib_hi = _B + INDUCEMENT_ZONE_LO * bos_rng, _B + INDUCEMENT_ZONE_HI * bos_rng
+        its_lo = float(df_h1_live['ts'].iloc[bos_idx])
+        its_hi = float(df_h1_live['ts'].iloc[peak_idx])
+        df_idm = df_h1_live if INDUCEMENT_TF == "60" else get_data(coin, "5", limit=300)
+        idm_chk = None
+        if df_idm is not None:
+            idm_chk = find_inducement(df_idm, stype, ib_lo, ib_hi, n=INDUCEMENT_SWING, ts_lo=its_lo, ts_hi=its_hi)
+        if idm_chk is None:
+            if verbose:
+                print(f"   {coin}: BOS {stype} TAK ada IDM mini-BOS {INDUCEMENT_SWING}-{INDUCEMENT_SWING} "
+                      f"di pita {INDUCEMENT_ZONE_LO*100:.0f}-{INDUCEMENT_ZONE_HI*100:.0f}% (skip FVG limit)")
+            return None, None
     zlo = deepest_retrace_lo(df_h1_live, bos_idx, choch_level, stype)
-    gaps = _get_fvgs(df_h1_live, stype, bos_idx, choch_level, zone_lo=zlo)
     if not gaps:
         if verbose:
             raw = get_internal_gaps(df_h1_live, stype, bos_idx)
@@ -1705,13 +1742,14 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.2 | swing {SWING_BARS}-{SWING_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.4 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
+          f"FVG butuh IDM {'ON' if REQUIRE_IDM_FOR_FVG else 'off'} | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
-          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
+          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d..%d-%d %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_SWING_MAX-1, INDUCEMENT_SWING_MAX-1, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
