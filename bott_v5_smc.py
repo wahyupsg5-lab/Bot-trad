@@ -1340,13 +1340,16 @@ def apply_latest_leg(df, sh, sl, stype, swing_val, brk_idx, choch_level, peak_va
             c = [x for x in fsh if i_lo <= x['idx'] < i_hi]
         return max(c, key=lambda x: x['idx']) if c else None
 
-    def retr(s2v, chv, i_from, i_to):   # retrace >= RETRACE_LOCK leg [chv..s2v] di [i_from,i_to]?
+    def retr(s2v, chv, i_from, i_to):   # retrace >= RETRACE_LOCK leg [chv..s2v] SETELAH candle swing-2?
+        a = i_from + 1                  # JANGAN hitung candle swing-2 sendiri (low/high-nya bagian pembentuk swing-2)
+        if a > i_to:
+            return False
         if stype == "Long":
             half = s2v - RETRACE_LOCK * (s2v - chv)
-            return float(df['low'].iloc[i_from:i_to + 1].min()) <= half
+            return float(df['low'].iloc[a:i_to + 1].min()) <= half
         else:
             half = s2v + RETRACE_LOCK * (chv - s2v)
-            return float(df['high'].iloc[i_from:i_to + 1].max()) >= half
+            return float(df['high'].iloc[a:i_to + 1].max()) >= half
 
     def rebreak_choch(i_lo, i_hi):   # choch leg rebreak: swing HALUS terbaru, ATAU titik retrace TERDALAM
         nch = prot_between(i_lo, i_hi)
@@ -1837,7 +1840,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.10 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.11 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
