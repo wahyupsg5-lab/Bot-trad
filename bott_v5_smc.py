@@ -164,8 +164,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 4.0    # TP di 1:RR_TP (4.0 = 1:4)
-RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
-LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+RISK_PCT         = 0.02   # risk per trade = 1% dari total equity
+LEVERAGE         = 50     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -175,7 +175,7 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.05   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
@@ -1315,11 +1315,12 @@ def reconstruct_state():
 def pick_bos_swing(df, sh_h1, sl_h1, stype):
     """Pilih swing-1 BOS: swing 5-5 terbaru yang di-break & menghasilkan struktur LENGKAP (choch 5-5 sah).
     Return (swing_val, brk_idx) atau (None, None)."""
-    idx_arr = df.index; closes = df['close']
+    idx_arr = df.index
     up = (stype == "Long")
     swings = sh_h1 if up else sl_h1
+    ext = df['high'] if up else df['low']           # break dihitung pakai WICK (high/low), konsisten dgn puncak
     def _broken(s):
-        later = closes[idx_arr > s['idx']]
+        later = ext[idx_arr > s['idx']]
         if len(later) == 0: return False
         return bool((later > s['val']).any()) if up else bool((later < s['val']).any())
     cands = sorted([s for s in swings[-8:] if _broken(s)], key=lambda x: x['idx'], reverse=True)
@@ -1832,7 +1833,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.14 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.15 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
