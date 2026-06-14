@@ -163,7 +163,7 @@ TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron back
 TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
-RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
+RR_TP            = 4.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
 LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
@@ -178,7 +178,7 @@ MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembata
 APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.05   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
@@ -189,6 +189,18 @@ INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4
 INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
 REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya IDM mini-BOS di dalamnya (lebih ketat)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
+
+# === HEDGE MODE ===
+# True = IDM (market, kebalik arah) + limit FVG (searah BOS) boleh JALAN BARENGAN per koin.
+# WAJIB: akun Bybit di Hedge Mode (switch_position_mode mode=3) DULU. positionIdx: Buy=1, Sell=2.
+# PERINGATAN: ini ubah routing order live; UJI DI TESTNET (TESTNET=true) sebelum live.
+ALLOW_HEDGE = True
+def _pidx(side):
+    """positionIdx Bybit: hedge -> Buy=1/Sell=2; one-way -> 0."""
+    return (1 if side == "Buy" else 2) if ALLOW_HEDGE else 0
+def _akey(coin, e_stype):
+    """Key active_positions: hedge -> per-arah ('COIN|Long'); one-way -> 'COIN'."""
+    return f"{coin}|{e_stype}" if ALLOW_HEDGE else coin
 
 # (jalur eksperimen wait_rev DIBUANG — SMC inti only)
 
@@ -718,7 +730,7 @@ def place_market_order(symbol, side, entry, sl, trail_dist):
             category=CATEGORY, symbol=symbol, side=side,
             orderType="Market", qty=str(qty),
             stopLoss=str(sl_r),
-            positionIdx=0,
+            positionIdx=_pidx(side),
             timeInForce="IOC"
         )
         if res['retCode'] == 0:
@@ -746,7 +758,7 @@ def close_position(symbol, side, qty_str):
             category=CATEGORY, symbol=symbol,
             side=close_side, orderType="Market",
             qty=str(qty_r), reduceOnly=True,
-            positionIdx=0, timeInForce="IOC"
+            positionIdx=_pidx(side), timeInForce="IOC"
         )
         if res.get('retCode') == 0:
             print(f"⏹️  {symbol}: Posisi ditutup (trail timeout) @ market")
@@ -840,13 +852,13 @@ def place_limit_order(symbol, side, entry_p, sl_p):
                 category=CATEGORY, symbol=symbol, side=side,
                 orderType="Limit", qty=str(qty), price=str(entry_r),
                 stopLoss=str(sl_r), takeProfit=str(tp_r),
-                positionIdx=0, timeInForce="GTC")
+                positionIdx=_pidx(side), timeInForce="GTC")
         else:
             res = session.place_order(
                 category=CATEGORY, symbol=symbol, side=side,
                 orderType="Limit", qty=str(qty), price=str(entry_r),
                 stopLoss=str(sl_r), trailingStop=str(trail_r), activePrice=str(active_r),
-                positionIdx=0, timeInForce="GTC")
+                positionIdx=_pidx(side), timeInForce="GTC")
         if res['retCode'] == 0:
             return res['result']['orderId']
         print(f"⚠️ {symbol}: Limit order ditolak → {res.get('retMsg','')} (code:{res['retCode']})")
@@ -894,7 +906,7 @@ def place_market_entry(coin, side, curr_price, sl_p, tp_p):
         res = session.place_order(category=CATEGORY, symbol=coin, side=side,
                                   orderType="Market", qty=str(qty),
                                   stopLoss=str(sl_r), takeProfit=str(tp_r),
-                                  positionIdx=0, timeInForce="IOC")
+                                  positionIdx=_pidx(side), timeInForce="IOC")
         if res['retCode'] == 0:
             print(f"   induce filled: qty {qty} SL {sl_r} TP {tp_r} (margin ~${required_margin:.2f}, risk ${risk_usd:.2f})")
             return res['result']['orderId'], qty
@@ -909,7 +921,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
     """Inducement entry (market, KEBALIK arah BOS besar). Berdampingan dgn limit FVG.
     BOS besar Long: inducement long 1-1 di pita 0-61% (dekat puncak); low-nya disapu M5 -> entry SHORT.
     BOS besar Short: cerminannya -> entry LONG. SL = 10% range BOS besar, TP 1:RR_TP."""
-    if not INDUCEMENT_ENTRY or coin in active_positions:
+    if not INDUCEMENT_ENTRY or (not ALLOW_HEDGE and coin in active_positions):
         return False
     for stype in ("Long", "Short"):
         a = bos_anchors(df_h1, sh_h1, sl_h1, stype)
@@ -968,9 +980,12 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             sl_p, tp_p = curr - sl_dist, curr + RR_TP * sl_dist
         print(f"🎯 {coin}: INDUCEMENT {stype} disapu (level {prot:.6g}, pita {band_lo:.6g}-{band_hi:.6g}) "
               f"→ entry {e_stype} MARKET @ ~{curr:.6g} | SL {sl_p:.6g} (10% range) TP {tp_p:.6g} (1:{RR_TP})")
+        if _akey(coin, e_stype) in active_positions:
+            continue                       # sisi IDM ini sudah terbuka -> jangan dobel
         oid, qty = place_market_entry(coin, side, curr, sl_p, tp_p)
         if oid:
-            active_positions[coin] = {
+            active_positions[_akey(coin, e_stype)] = {
+                'coin': coin,
                 'side': side, 'entry': curr, 'sl': sl_p, 'dist': abs(curr - sl_p),
                 'trail_dist': 0, 'trail_engaged': False, 'trail_set': True,
                 'last_price': curr, 'entry_time': time.time(),
@@ -996,7 +1011,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 f"  SL={sl_p:.6g} (10% range) | TP={tp_p:.6g} (1:{RR_TP})"
             )
             log_entry(rec)
-            if coin in pending:   # one-way mode: batalkan limit FVG yg pending utk koin ini
+            if (not ALLOW_HEDGE) and coin in pending:   # one-way: batalkan limit FVG; hedge: biarkan
                 for d, st in list(pending[coin].items()):
                     if st.get('order_id'):
                         cancel_order(coin, st['order_id'])
@@ -1045,13 +1060,16 @@ def _order_was_filled(symbol, order_id):
     return False
 
 
-def get_open_position(symbol):
+def get_open_position(symbol, want_side=None):
     try:
         res = session.get_positions(category=CATEGORY, symbol=symbol)
         if res['retCode'] == 0:
             for pos in res['result']['list']:
-                if float(pos['size']) > 0:
-                    return pos
+                if float(pos['size']) <= 0:
+                    continue
+                if ALLOW_HEDGE and want_side is not None and pos.get('side') != want_side:
+                    continue            # hedge: ambil HANYA sisi yg diminta (Buy/Sell)
+                return pos
         return None
     except:
         return None
@@ -1062,7 +1080,7 @@ def move_sl(symbol, new_sl, side="Buy"):
         res = session.set_trading_stop(
             category=CATEGORY, symbol=symbol,
             stopLoss=str(new_sl),
-            positionIdx=0
+            positionIdx=_pidx(side)
         )
         return res['retCode'] == 0
     except:
@@ -1090,17 +1108,15 @@ def _get_actual_exit_price(symbol):
     return None
 
 
-def check_trailing_sl(coin):
-    """
-    Dipanggil setiap M5 close.
-    Cek apakah posisi sudah tutup. Jika ya, update done_setups dan hapus dari active_positions.
-    Jika masih buka, update last_price dan set trailing stop jika belum dipasang.
-    """
-    if coin not in active_positions:
+def check_trailing_sl(key):
+    """Dipanggil tiap M5 close untuk SATU posisi (key = 'COIN' one-way / 'COIN|Long' hedge).
+    Cek apakah posisi tutup. Jika ya hapus dari active_positions; jika buka set trailing."""
+    if key not in active_positions:
         return
-
-    p   = active_positions[coin]
-    pos = get_open_position(coin)
+    p    = active_positions[key]
+    coin = p.get('coin', key)
+    side = p.get('side')
+    pos  = get_open_position(coin, side)
 
     if pos is None:
         actual_exit = _get_actual_exit_price(coin)
@@ -1109,19 +1125,19 @@ def check_trailing_sl(coin):
         orig_ocl    = p.get('orig_ocl', entry)
 
         # (reverse-on-SL dibuang — SMC inti: SL kena = trade selesai, tidak balik arah)
-        print(f"📭 {coin}: Posisi tutup @ {exit_str}.")
+        print(f"📭 {coin} {p.get('bos_type','')}: Posisi tutup @ {exit_str}.")
         done_setups[coin] = {
             'swing_val': p.get('swing_val'),
             'stype'    : p.get('bos_type'),
             'used_ocl' : orig_ocl,
         }
-        del active_positions[coin]
+        del active_positions[key]
         return
 
     # Posisi masih buka — update last_price, peak, dan cek trail timeout
     try:
         curr_price = float(pos['markPrice'])
-        active_positions[coin]['last_price'] = curr_price
+        active_positions[key]['last_price'] = curr_price
 
         entry = p['entry']
         dist  = p.get('dist', 0)
@@ -1132,8 +1148,8 @@ def check_trailing_sl(coin):
         peak_time = p.get('peak_time', p.get('entry_time', time.time()))
         new_peak  = max(peak, curr_price) if side == 'Buy' else min(peak, curr_price)
         if new_peak != peak:
-            active_positions[coin]['peak']      = new_peak
-            active_positions[coin]['peak_time'] = time.time()
+            active_positions[key]['peak']      = new_peak
+            active_positions[key]['peak_time'] = time.time()
             peak_time = time.time()
 
         # Trail timeout: close jika peak tidak bergerak selama TRAIL_TIMEOUT_DAYS hari
@@ -1149,7 +1165,7 @@ def check_trailing_sl(coin):
                     'stype'    : p.get('bos_type'),
                     'used_ocl' : p.get('orig_ocl', entry),
                 }
-                del active_positions[coin]
+                del active_positions[key]
             return
 
         # Pasang trailing stop via set_trading_stop saat pertama posisi terdeteksi
@@ -1168,10 +1184,10 @@ def check_trailing_sl(coin):
                         category=CATEGORY, symbol=coin,
                         trailingStop=str(trail_r),
                         activePrice=str(active_p),
-                        positionIdx=0
+                        positionIdx=_pidx(side)
                     )
                     if res_ts['retCode'] == 0:
-                        active_positions[coin]['trail_set'] = True
+                        active_positions[key]['trail_set'] = True
                         print(f"📍 {coin}: Trailing stop {trail_r} dipasang "
                               f"(aktif @ {active_p} = entry+{TRAIL_ACT_R}R)")
                     else:
@@ -1182,10 +1198,10 @@ def check_trailing_sl(coin):
 
         if (not USE_TP) and dist > 0 and not p.get('trail_engaged', False):
             if side == "Buy"  and curr_price >= entry + TRAIL_ACT_R * dist:
-                active_positions[coin]['trail_engaged'] = True
+                active_positions[key]['trail_engaged'] = True
                 print(f"✅ {coin}: Trail engaged @ {curr_price:.6f} (+{TRAIL_ACT_R}R)")
             elif side == "Sell" and curr_price <= entry - TRAIL_ACT_R * dist:
-                active_positions[coin]['trail_engaged'] = True
+                active_positions[key]['trail_engaged'] = True
                 print(f"✅ {coin}: Trail engaged @ {curr_price:.6f} (+{TRAIL_ACT_R}R)")
     except Exception:
         pass
@@ -1750,7 +1766,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
             setup['phase'] = 'WAIT_APPROACH'; setup.pop('order_id', None)
             print(f"📤 {coin} {stype}: Limit dibatalkan (harga mundur > {APPROACH_R}R). Menunggu lagi.")
             return 'keep'
-        pos = get_open_position(coin)
+        pos = get_open_position(coin, 'Buy' if stype == 'Long' else 'Sell')
         if pos:
             entry_p = setup['entry']; sl_p = setup['sl']
             side_order = "Buy" if stype == "Long" else "Sell"
@@ -1772,9 +1788,9 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
                 try:
                     if USE_TP:
                         tp_r = round_price(actual_entry + RR_TP * actual_dist if side_order == "Buy" else actual_entry - RR_TP * actual_dist, tick)
-                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), takeProfit=str(tp_r), positionIdx=0)
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), takeProfit=str(tp_r), positionIdx=_pidx(side_order))
                     else:
-                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=0)
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r), trailingStop=str(trail_r), activePrice=str(active_p), positionIdx=_pidx(side_order))
                     if res_ts.get('retCode', -1) == 0:
                         trail_set_ok = True
                         print(f"🛡️  {coin}: SL={sl_r} " + (f"TP={tp_r} (1:{RR_TP})" if USE_TP else f"Trail={trail_r} act={active_p}"))
@@ -1785,7 +1801,8 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
                     print(f"⚠️ {coin}: set_trading_stop error: {e}"); time.sleep(2)
             if not trail_set_ok:
                 print(f"⚠️ {coin}: Trail gagal — retry M5 berikutnya")
-            active_positions[coin] = {
+            active_positions[_akey(coin, stype)] = {
+                'coin': coin,
                 'side': side_order, 'entry': actual_entry, 'sl': sl_p, 'dist': actual_dist,
                 'trail_dist': trail_d, 'trail_engaged': False, 'trail_set': trail_set_ok,
                 'last_price': actual_entry, 'entry_time': time.time(),
@@ -1815,17 +1832,32 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.13 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.14 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
           f"monitor 2-arah | fresh-C1 {'ON' if REQUIRE_FRESH_C1 else 'off'} | "
           f"FVG butuh IDM {'ON' if REQUIRE_IDM_FOR_FVG else 'off'} | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
-          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | induce {('ON %s %d-%d..%d-%d %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_SWING, INDUCEMENT_SWING, INDUCEMENT_SWING_MAX-1, INDUCEMENT_SWING_MAX-1, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
+          f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | "
+          f"HEDGE {'ON (IDM+FVG barengan)' if ALLOW_HEDGE else 'off (one-way)'} | "
+          f"induce {('ON %s rantai-mini-BOS %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
+    if ALLOW_HEDGE:
+        try:
+            r = session.switch_position_mode(category=CATEGORY, coin="USDT", mode=3)
+            rc = r.get('retCode', -1)
+            if rc == 0:
+                print("🔀 Hedge mode AKTIF (switch_position_mode mode=3, semua USDT-perp).")
+            elif rc == 110025:
+                print("🔀 Hedge mode sudah aktif (tak berubah).")
+            else:
+                print(f"⚠️ switch_position_mode: {r.get('retMsg','')} (code:{rc}) — "
+                      f"set Hedge Mode manual di app & TUTUP semua posisi dulu kalau perlu.")
+        except Exception as e:
+            print(f"⚠️ switch_position_mode error: {e} — set Hedge Mode manual di app dulu.")
 
     while True:
         now = time.time()
@@ -1836,9 +1868,9 @@ def run_bot():
         print(f"⏱️  Tunggu candle M5 close: {wait_sec:.0f} detik...")
         time.sleep(wait_sec)
 
-        for coin in list(active_positions.keys()):
+        for _k in list(active_positions.keys()):
             try:
-                check_trailing_sl(coin)
+                check_trailing_sl(_k)
             except Exception as e:
                 print(f"⚠️ Trailing SL {coin}: {e}")
 
@@ -1850,6 +1882,7 @@ def run_bot():
         print(f"📊 SLOT: {slots_used}/{MAX_CONCURRENT} terpakai (posisi:{n_active} | limit:{n_waitfill} | watch:{n_approach})")
         if active_positions:
             for c, p in active_positions.items():
+                c = p.get('coin', c)
                 bk = p.get('swing_val'); pk = p.get('peak_val'); ch = p.get('choch_level')
                 bk = f"{bk:.6g}" if bk else "—"; pk = f"{pk:.6g}" if pk else "—"; ch = f"{ch:.6g}" if ch else "—"
                 print(f"   POSISI {c} {p.get('bos_type','?')} @ {p.get('entry',0):.6g} SL:{p.get('sl',0):.6g} | "
@@ -1866,7 +1899,7 @@ def run_bot():
         for coin in SYMBOLS:
             try:
                 time.sleep(3)
-                if coin in active_positions:
+                if (not ALLOW_HEDGE) and coin in active_positions:
                     continue
                 df_h1_live = get_data(coin, "60", limit=100)
                 if df_h1_live is None:
@@ -1901,6 +1934,8 @@ def run_bot():
                         continue
                     # Re-deteksi DUA ARAH: tambah/ganti di arah yg masih WAIT_APPROACH atau belum ada
                     for d in ('Long', 'Short'):
+                        if ALLOW_HEDGE and _akey(coin, d) in active_positions:
+                            continue   # hedge: arah ini posisinya sudah terbuka -> jangan pasang limit lagi
                         cur = dirs.get(d)
                         if cur is not None and cur.get('phase') == 'WAIT_FILL':
                             continue   # arah terkunci (limit terpasang)
@@ -1924,6 +1959,8 @@ def run_bot():
                 # ── SCAN SETUP BARU: deteksi DUA ARAH sekaligus ──
                 dirs_new = {}
                 for d in ('Long', 'Short'):
+                    if ALLOW_HEDGE and _akey(coin, d) in active_positions:
+                        continue   # hedge: arah ini posisinya sudah terbuka
                     cand, cand_log = build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=False, force_dir=d)
                     if cand:
                         print(cand_log); dirs_new[d] = cand
