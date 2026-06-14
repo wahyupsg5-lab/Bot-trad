@@ -163,7 +163,7 @@ TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron back
 TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
-RR_TP            = 4.0    # TP di 1:RR_TP (4.0 = 1:4)
+RR_TP            = 3.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.02   # risk per trade = 1% dari total equity
 LEVERAGE         = 50     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
