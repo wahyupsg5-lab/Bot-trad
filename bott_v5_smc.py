@@ -164,8 +164,8 @@ TRAIL_ACT_R      = 2.5    # trail aktif setelah +TRAIL_ACT_R (Bybit min > traili
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = True   # True = TP fix (RR_TP), trailing DIMATIKAN
 RR_TP            = 2.0    # TP di 1:RR_TP (2.0 = 1:2)
-RISK_PCT         = 0.02   # risk per trade = 1% dari total equity
-LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
+LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -175,7 +175,7 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.5    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
 SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
@@ -989,7 +989,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 f"swing-1={idm['micro_val']:.6g}@{idm['micro_idx']} | "
                 f"choch-TRIGGER={prot:.6g}@{idm['prot_idx']} "
                 f"({(((a['B']-prot) if stype=='Long' else (prot-a['B']))/rng*100 if rng>0 else 0):.0f}% dari puncak, "
-                f"terdekat-35%; {idm.get('n_trigger',1)} kandidat IDM {[round(x,6) for x in idm.get('all_triggers',[prot])]}) | "
+                f"terakhir-di-pita; {idm.get('n_trigger',1)} leg di pita, semua trigger {[round(x,6) for x in idm.get('all_triggers',[prot])]}) | "
                 f"pita35-55%={band_lo:.6g}-{band_hi:.6g}\n"
                 f"  TRIGGER(M5 close): ts={int(trig['ts'])} low={float(trig['low']):.6g} high={float(trig['high']):.6g} "
                 f"close={float(trig['close']):.6g} (menyapu IDM {prot:.6g})\n"
@@ -1431,33 +1431,16 @@ def bos_anchors(df, sh_h1, sl_h1, stype):
 
 
 def find_inducement(df_tf, big_stype, band_lo, band_hi, n=1, ts_lo=None, ts_hi=None):
-    """Inducement = MINI-BOS searah big_stype (swing 1-1..4-4; 5-5+ dibuang -> itu BOS besar).
-    TRIGGER tiap IDM = choch mini-BOS (di antara swing-1 & swing-2). Bisa ADA BANYAK IDM.
-    Kumpulkan SEMUA trigger di PITA 35-55% range BOS besar, lalu pilih yang TERDEKAT ke 35%
-    (level dekat puncak). Tak pakai rebreak/latest-leg. choch (trigger) kalau disapu M5 -> entry lawan.
-    Return {prot(trigger terpilih), prot_idx, micro_val(swing-1), micro_idx, n_trigger, all_triggers} atau None."""
+    """Inducement = RANTAI mini-BOS dari choch->puncak (jendela ts_lo..ts_hi).
+    Cara: telusuri record-high berturut (Long). Tiap kali record ditembus record berikutnya = 1 leg/IDM.
+      - TRIGGER leg = low TERENDAH di antara dua record (raw low candle, eksklusif candle record).
+      - Short = cermin: record-LOW, trigger = high TERTINGGI antar record.
+    IDM AKTIF = leg TERAKHIR yang trigger-nya jatuh di pita [band_lo,band_hi] (35-60% range BOS besar).
+      Kalau leg terakhir terlalu dangkal (<35%, di luar pita) -> mundur ke leg sebelumnya yg di pita.
+    Return {prot(trigger), prot_idx, micro_val(peak ditembus), micro_idx, n_trigger, all_triggers} atau None."""
     if df_tf is None or len(df_tf) < (2 * n + 1):
         return None
-    sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)   # swing n-n (minimum)
-    if not sh_tf or not sl_tf:
-        return None
-    # BUANG swing skala BOS besar: kekuatan >= INDUCEMENT_SWING_MAX di KEDUA sisi (mis. 5-5+).
-    # IDM hanya boleh dari swing minor (1-1 s/d 4-4, asimetris spt 2-4 boleh; 5-3 boleh, 5-5 tidak).
-    hi_a = df_tf['high'].values; lo_a = df_tf['low'].values
-    cap = INDUCEMENT_SWING_MAX
-    def _too_big(idx, is_high):
-        arr = hi_a if is_high else lo_a
-        v = arr[idx]; L = 0; R = 0; k = 1
-        while idx - k >= 0 and ((arr[idx - k] < v) if is_high else (arr[idx - k] > v)):
-            L += 1; k += 1
-            if L >= cap: break
-        k = 1
-        while idx + k < len(arr) and ((arr[idx + k] < v) if is_high else (arr[idx + k] > v)):
-            R += 1; k += 1
-            if R >= cap: break
-        return L >= cap and R >= cap
-    sh_tf = [s for s in sh_tf if not _too_big(s['idx'], True)]
-    sl_tf = [s for s in sl_tf if not _too_big(s['idx'], False)]
+    sh_tf, sl_tf = find_last_swing_bos(df_tf, n=n)
     if not sh_tf or not sl_tf:
         return None
     ts_col = df_tf['ts']
@@ -1466,42 +1449,34 @@ def find_inducement(df_tf, big_stype, band_lo, band_hi, n=1, ts_lo=None, ts_hi=N
             return True
         t = float(ts_col.iloc[idx])
         return ts_lo <= t <= ts_hi
-    shw = [s for s in sh_tf if _in_win(s['idx'])]
-    slw = [s for s in sl_tf if _in_win(s['idx'])]
-    if not shw or not slw:
-        return None
-    # ENUMERASI SEMUA mini-BOS 1-1 searah: tiap swing-1 (1-1..4-4) yg di-break -> choch = TRIGGER.
-    # Bisa ada banyak IDM. Kumpulkan SEMUA trigger yang ada di pita 35-55%, lalu pilih yang
-    # TERDEKAT ke 35% (level dekat puncak). Tak pakai rebreak/latest-leg (IDM = mini-BOS murni).
     up = (big_stype == "Long")
-    swings1 = shw if up else slw
-    closes = df_tf['close']; idx_arr = df_tf.index
-    triggers = []   # (trigger_val, trigger_idx, swing1_val, swing1_idx)
-    for s in swings1:
-        later = closes[idx_arr > s['idx']]
-        if len(later) == 0:
-            continue
-        broken = bool((later > s['val']).any()) if up else bool((later < s['val']).any())
-        if not broken:
-            continue
-        mb, mch, _mpk = impulse_anchors(big_stype, s['val'], s['idx'], shw, slw, df_tf)
-        if mb is None or mch is None:
-            continue
-        if band_lo <= mch <= band_hi:                 # trigger di pita 35-55%
-            triggers.append((mch, mb, s['val'], s['idx']))
-    if not triggers:
+    piv = [s for s in (sh_tf if up else sl_tf) if _in_win(s['idx'])]
+    piv.sort(key=lambda s: s['idx'])
+    if len(piv) < 2:
         return None
-    seen = set(); uniq = []                           # dedup: trigger value sama -> 1 saja
-    for t in sorted(triggers, key=lambda x: x[1]):
-        k = round(t[0], 10)
-        if k in seen:
-            continue
-        seen.add(k); uniq.append(t)
-    triggers = uniq
-    lvl35 = band_hi if up else band_lo                # level 35% (dekat puncak)
-    best = min(triggers, key=lambda t: abs(t[0] - lvl35))   # trigger TERDEKAT ke 35%
+    lo_a = df_tf['low'].values; hi_a = df_tf['high'].values
+    legs = []   # (trigger_val, trigger_idx, broken_peak_val, broken_peak_idx)
+    rec_v, rec_i = piv[0]['val'], piv[0]['idx']
+    for s in piv[1:]:
+        is_break = (s['val'] > rec_v) if up else (s['val'] < rec_v)
+        if not is_break:
+            continue                                   # lower-high (Long) / higher-low (Short) -> bukan record, lewati
+        a_seg, b_seg = rec_i + 1, s['idx']             # low/high antar record, EKSKLUSIF candle record
+        if b_seg > a_seg:
+            if up:
+                seg = lo_a[a_seg:b_seg]; off = int(seg.argmin()); tval = float(seg.min())
+            else:
+                seg = hi_a[a_seg:b_seg]; off = int(seg.argmax()); tval = float(seg.max())
+            legs.append((tval, a_seg + off, rec_v, rec_i))
+        rec_v, rec_i = s['val'], s['idx']              # record maju
+    if not legs:
+        return None
+    inband = [lg for lg in legs if band_lo <= lg[0] <= band_hi]
+    if not inband:
+        return None
+    best = inband[-1]                                  # leg TERAKHIR (terdekat puncak) yg di pita
     return {'prot': best[0], 'prot_idx': best[1], 'micro_val': best[2], 'micro_idx': best[3],
-            'n_trigger': len(triggers), 'all_triggers': sorted(t[0] for t in triggers)}
+            'n_trigger': len(inband), 'all_triggers': [round(lg[0], 10) for lg in legs]}
 
 
 def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True, force_dir=None):
@@ -1840,7 +1815,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.12 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.13 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
