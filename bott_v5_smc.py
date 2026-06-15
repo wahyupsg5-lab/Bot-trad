@@ -163,7 +163,7 @@ TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron back
 TRAIL_ACT_R      = 2.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
-RR_TP            = 2.0    # TP di 1:RR_TP (4.0 = 1:4)
+RR_TP            = 10.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
 LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
@@ -175,19 +175,26 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 4.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.05   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
-INDUCEMENT_ZONE_LO = 0.382 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
+INDUCEMENT_ZONE_LO = 0.35 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
 INDUCEMENT_ZONE_HI = 0.60 # ...sampai 60% range. (pita IDM 35-60%)
 INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
 INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4-4 & asimetris otomatis)
 INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
 REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya IDM mini-BOS di dalamnya (lebih ketat)
+
+# === ENTRY IDM via LIMIT (Fib retrace candle M5 pemicu) ===
+# True = entry IDM pakai LIMIT di Fib IDM_LIMIT_FIB dari range candle M5 yg close menembus trigger
+#        (Long: 0%=low,100%=high; Short: 0%=high,100%=low). False = market di harga sweep (lama).
+IDM_LIMIT_ENTRY    = True
+IDM_LIMIT_FIB      = 0.382  # 38.2% dari range candle pemicu
+IDM_LIMIT_EXPIRY_MIN = 60   # batalkan limit IDM jika tak terisi dalam N menit
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # === HEDGE MODE ===
@@ -288,6 +295,7 @@ SESSION_FILTER: dict = {
 
 
 pending          = {}
+idm_pending      = {}   # _akey(coin,e_stype) -> limit IDM yg menunggu fill (Fib retrace candle M5)
 active_positions = {}
 inducement_done  = {}   # coin -> signature struktur BOS besar yg sudah di-entry inducement (anti entry-ulang)
 instrument_cache = {}
@@ -974,12 +982,57 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         curr = float(df_m5.iloc[-1]['close'])
         trig = df_m5.iloc[-2]              # candle M5 yg menyapu (closed terakhir)
         sl_dist = SL_CAP_RANGE * rng
+        if _akey(coin, e_stype) in active_positions or _akey(coin, e_stype) in idm_pending:
+            continue                       # sisi IDM ini sudah terbuka / limit sudah terpasang
+
+        if IDM_LIMIT_ENTRY:
+            # ENTRY LIMIT di Fib IDM_LIMIT_FIB range candle pemicu (entry lebih bagus saat candle besar)
+            hi_c, lo_c = float(trig['high']), float(trig['low'])
+            rng_c = hi_c - lo_c
+            if rng_c <= 0:
+                continue
+            if e_stype == "Long":          # 0%=low,100%=high -> entry di 38.2% dari bawah
+                entry_p = lo_c + IDM_LIMIT_FIB * rng_c
+                sl_p = entry_p - sl_dist
+            else:                          # Short: 0%=high,100%=low -> entry di 38.2% dari atas
+                entry_p = hi_c - IDM_LIMIT_FIB * rng_c
+                sl_p = entry_p + sl_dist
+            print(f"🎯 {coin}: INDUCEMENT {stype} disapu (level {prot:.6g}) → LIMIT {e_stype} @ "
+                  f"{entry_p:.6g} (Fib {IDM_LIMIT_FIB*100:.1f}% candle M5 {lo_c:.6g}-{hi_c:.6g}) | SL {sl_p:.6g}")
+            oid = place_limit_order(coin, side, entry_p, sl_p)
+            if oid:
+                idm_pending[_akey(coin, e_stype)] = {
+                    'coin': coin, 'side': side, 'e_stype': e_stype, 'order_id': oid,
+                    'entry': entry_p, 'sl': sl_p, 'placed_ts': time.time(),
+                    'swing_val': a['swing_val'], 'choch_level': a['choch_level'],
+                    'peak_val': a['peak_val'], 'bos_type': e_stype,
+                }
+                inducement_done[coin] = sig
+                rec = (
+                    f"════ LIMIT INDUCEMENT (Fib {IDM_LIMIT_FIB*100:.1f}%) ════\n"
+                    f"  {coin} | LIMIT {e_stype} @ {entry_p:.6g} | SL {sl_p:.6g}\n"
+                    f"  BOS BESAR ({stype}): break={a['swing_val']:.6g} choch={a['choch_level']:.6g} "
+                    f"puncak={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} range={rng:.6g}\n"
+                    f"  IDM trigger={prot:.6g}@{idm['prot_idx']} (terakhir-di-pita; semua {[round(x,6) for x in idm.get('all_triggers',[prot])]})\n"
+                    f"  CANDLE M5 pemicu: low={lo_c:.6g} high={hi_c:.6g} close={float(trig['close']):.6g} "
+                    f"→ entry Fib {IDM_LIMIT_FIB*100:.1f}% = {entry_p:.6g}"
+                )
+                log_entry(rec)
+                if (not ALLOW_HEDGE) and coin in pending:
+                    for d, st in list(pending[coin].items()):
+                        if st.get('order_id'):
+                            cancel_order(coin, st['order_id'])
+                    pending.pop(coin, None)
+                return True
+            continue
+
+        # --- jalur lama: MARKET di harga sweep (kalau IDM_LIMIT_ENTRY=False) ---
         if e_stype == "Short":
             sl_p, tp_p = curr + sl_dist, curr - RR_TP * sl_dist
         else:
             sl_p, tp_p = curr - sl_dist, curr + RR_TP * sl_dist
         print(f"🎯 {coin}: INDUCEMENT {stype} disapu (level {prot:.6g}, pita {band_lo:.6g}-{band_hi:.6g}) "
-              f"→ entry {e_stype} MARKET @ ~{curr:.6g} | SL {sl_p:.6g} (10% range) TP {tp_p:.6g} (1:{RR_TP})")
+              f"→ entry {e_stype} MARKET @ ~{curr:.6g} | SL {sl_p:.6g} TP {tp_p:.6g}")
         if _akey(coin, e_stype) in active_positions:
             continue                       # sisi IDM ini sudah terbuka -> jangan dobel
         oid, qty = place_market_entry(coin, side, curr, sl_p, tp_p)
@@ -1831,9 +1884,38 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
     return 'keep'
 
 
+def check_idm_pending():
+    """Cek limit IDM (Fib) yg menunggu: terisi -> active_positions; kadaluarsa -> batalkan."""
+    for key in list(idm_pending.keys()):
+        p = idm_pending[key]
+        coin, side = p['coin'], p['side']
+        pos = get_open_position(coin, side)
+        if pos is not None and float(pos.get('size', 0) or 0) > 0:
+            entry = float(pos.get('avgPrice') or p['entry'])
+            active_positions[key] = {
+                'coin': coin, 'side': side, 'entry': entry, 'sl': p['sl'],
+                'dist': abs(entry - p['sl']),
+                'trail_dist': 0, 'trail_engaged': False, 'trail_set': True,
+                'last_price': entry, 'entry_time': time.time(),
+                'peak': entry, 'peak_time': time.time(),
+                'swing_val': p['swing_val'], 'bos_type': p['e_stype'], 'rev_count': 0,
+                'orig_ocl': entry, 'choch_level': p['choch_level'], 'peak_val': p['peak_val'],
+                'swing2': p['peak_val'], 'kind': 'inducement',
+            }
+            print(f"✅ {coin}: LIMIT IDM {p['e_stype']} TERISI @ {entry:.6g}")
+            log_entry(f"════ FILL INDUCEMENT {p['e_stype']} {coin} @ {entry:.6g} (limit Fib {IDM_LIMIT_FIB*100:.1f}%) ════")
+            del idm_pending[key]
+            continue
+        if (time.time() - p['placed_ts']) > IDM_LIMIT_EXPIRY_MIN * 60:
+            if p.get('order_id'):
+                cancel_order(coin, p['order_id'])
+            print(f"⌛ {coin}: LIMIT IDM {p['e_stype']} kadaluarsa ({IDM_LIMIT_EXPIRY_MIN}m) → batal.")
+            del idm_pending[key]
+
+
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.16 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.17 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
@@ -1842,7 +1924,7 @@ def run_bot():
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | "
           f"TP {'1:'+str(RR_TP) if USE_TP else 'trailing'} | "
           f"HEDGE {'ON (IDM+FVG barengan)' if ALLOW_HEDGE else 'off (one-way)'} | "
-          f"induce {('ON %s rantai-mini-BOS %.0f-%.0f%%' % (INDUCEMENT_TF, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100)) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
+          f"induce {('ON %s rantai-mini-BOS %.0f-%.0f%% [%s]' % (INDUCEMENT_TF, INDUCEMENT_ZONE_LO*100, INDUCEMENT_ZONE_HI*100, ('LIMIT Fib%.1f%%' % (IDM_LIMIT_FIB*100)) if IDM_LIMIT_ENTRY else 'MARKET')) if INDUCEMENT_ENTRY else 'off'} | bump order >=${ORDER_BUMP_FLOOR:.0f}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -1874,6 +1956,11 @@ def run_bot():
                 check_trailing_sl(_k)
             except Exception as e:
                 print(f"⚠️ Trailing SL {coin}: {e}")
+
+        try:
+            check_idm_pending()
+        except Exception as e:
+            print(f"⚠️ IDM pending: {e}")
 
         n_active   = len(active_positions)
         n_waitfill = _count_slots()
