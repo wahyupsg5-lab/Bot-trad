@@ -183,7 +183,7 @@ SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False =
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
 INDUCEMENT_ZONE_LO = 0.35 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
-INDUCEMENT_ZONE_HI = 0.99 # ...sampai 60% range. (pita IDM 35-60%)
+INDUCEMENT_ZONE_HI = 0.60 # ...sampai 60% range. (pita IDM 35-60%)
 INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
 INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4-4 & asimetris otomatis)
 INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
@@ -1898,10 +1898,36 @@ def check_idm_pending():
         pos = get_open_position(coin, side)
         if pos is not None and float(pos.get('size', 0) or 0) > 0:
             entry = float(pos.get('avgPrice') or p['entry'])
+            dist = abs(entry - p['sl'])
+            # pasang trailing/TP LANGSUNG saat fill (sama seperti jalur FVG, andal)
+            info = get_instrument_info(coin); tick = info.get('tick_size', 0.0001)
+            trail_d = TRAIL_STOP * dist
+            sl_r = round_price(p['sl'], tick); trail_r = round_price(trail_d, tick)
+            active_p = round_price(entry + TRAIL_ACT_R * dist if side == "Buy"
+                                   else entry - TRAIL_ACT_R * dist, tick)
+            trail_set_ok = False
+            for _attempt in range(3):
+                try:
+                    if USE_TP:
+                        tp_r = round_price(entry + RR_TP * dist if side == "Buy" else entry - RR_TP * dist, tick)
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
+                                                          takeProfit=str(tp_r), positionIdx=_pidx(side))
+                    else:
+                        res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin, stopLoss=str(sl_r),
+                                                          trailingStop=str(trail_r), activePrice=str(active_p),
+                                                          positionIdx=_pidx(side))
+                    if res_ts.get('retCode', -1) == 0:
+                        trail_set_ok = True
+                        print(f"🛡️  {coin} IDM: SL={sl_r} " + (f"TP={tp_r}" if USE_TP else f"Trail={trail_r} act={active_p}"))
+                        break
+                    else:
+                        print(f"⚠️ {coin} IDM: set_trading_stop gagal: {res_ts.get('retMsg','')}"); time.sleep(2)
+                except Exception as e:
+                    print(f"⚠️ {coin} IDM: set_trading_stop error: {e}"); time.sleep(2)
             active_positions[key] = {
                 'coin': coin, 'side': side, 'entry': entry, 'sl': p['sl'],
-                'dist': abs(entry - p['sl']),
-                'trail_dist': 0, 'trail_engaged': False, 'trail_set': False,
+                'dist': dist,
+                'trail_dist': trail_d, 'trail_engaged': False, 'trail_set': trail_set_ok,
                 'last_price': entry, 'entry_time': time.time(),
                 'peak': entry, 'peak_time': time.time(),
                 'swing_val': p['swing_val'], 'bos_type': p['e_stype'], 'rev_count': 0,
@@ -1909,7 +1935,7 @@ def check_idm_pending():
                 'swing2': p['peak_val'], 'kind': 'inducement',
             }
             print(f"✅ {coin}: LIMIT IDM {p['e_stype']} TERISI @ {entry:.6g}")
-            log_entry(f"════ FILL INDUCEMENT {p['e_stype']} {coin} @ {entry:.6g} (limit Fib {IDM_LIMIT_FIB*100:.1f}%) ════")
+            log_entry(f"════ FILL INDUCEMENT {p['e_stype']} {coin} @ {entry:.6g} (limit {IDM_LIMIT_FIB*100:.0f}% candle H1) ════")
             del idm_pending[key]
             continue
         # INVALIDASI PERGERAKAN: batal jika harga sudah bergerak > IDM_CANCEL_MOVE_PCT×range
@@ -1933,7 +1959,7 @@ def check_idm_pending():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.21 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.22 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
