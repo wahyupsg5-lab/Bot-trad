@@ -182,8 +182,8 @@ SL_CAP_RANGE     = 0.10   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
-INDUCEMENT_ZONE_LO = 0.35 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
-INDUCEMENT_ZONE_HI = 0.60 # ...sampai 60% range. (pita IDM 35-60%)
+INDUCEMENT_ZONE_LO = 0.268 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
+INDUCEMENT_ZONE_HI = 0.99 # ...sampai 60% range. (pita IDM 35-60%)
 INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
 INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4-4 & asimetris otomatis)
 INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
