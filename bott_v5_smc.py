@@ -163,7 +163,7 @@ TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron back
 TRAIL_ACT_R      = 2.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
-RR_TP            = 10.0    # TP di 1:RR_TP (4.0 = 1:4)
+RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
 LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
@@ -175,10 +175,10 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 4.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.05   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.10   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
@@ -193,8 +193,8 @@ REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya I
 # True = entry IDM pakai LIMIT di Fib IDM_LIMIT_FIB dari range candle M5 yg close menembus trigger
 #        (Long: 0%=low,100%=high; Short: 0%=high,100%=low). False = market di harga sweep (lama).
 IDM_LIMIT_ENTRY    = True
-IDM_LIMIT_FIB      = 0.382  # 38.2% dari range candle pemicu
-IDM_LIMIT_EXPIRY_MIN = 60   # batalkan limit IDM jika tak terisi dalam N menit
+IDM_LIMIT_FIB      = 0.618 # 38.2% dari range candle pemicu
+IDM_LIMIT_EXPIRY_MIN = 30   # batalkan limit IDM jika tak terisi dalam N menit
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # === HEDGE MODE ===
@@ -958,15 +958,15 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         if idm is None:
             continue
         prot = idm['prot']
-        # SAPUAN dicek di M5: candle M5 SETELAH puncak yang menembus level IDM.
-        # Entry HANYA bila sapuan PERTAMA = candle M5 CLOSED TERAKHIR (sapuan baru, edge-trigger).
+        # SAPUAN di M5: candle M5 SETELAH puncak yang MENYENTUH level IDM (touch, tak harus tembus).
+        # Entry HANYA bila sentuhan PERTAMA = candle M5 CLOSED TERAKHIR (sapuan baru, edge-trigger).
         m5_after = df_m5[df_m5['ts'] > ts_hi]
         if len(m5_after) == 0:
             continue
         if stype == "Long":
-            breaches = m5_after.index[m5_after['low'] < prot]
+            breaches = m5_after.index[m5_after['low'] <= prot]   # touch: low menyentuh/menembus
         else:
-            breaches = m5_after.index[m5_after['high'] > prot]
+            breaches = m5_after.index[m5_after['high'] >= prot]  # touch: high menyentuh/menembus
         last_closed_idx = df_m5.index[-2]
         if len(breaches) == 0:
             continue                       # IDM belum disapu di M5 -> monitor
@@ -1895,7 +1895,7 @@ def check_idm_pending():
             active_positions[key] = {
                 'coin': coin, 'side': side, 'entry': entry, 'sl': p['sl'],
                 'dist': abs(entry - p['sl']),
-                'trail_dist': 0, 'trail_engaged': False, 'trail_set': True,
+                'trail_dist': 0, 'trail_engaged': False, 'trail_set': False,
                 'last_price': entry, 'entry_time': time.time(),
                 'peak': entry, 'peak_time': time.time(),
                 'swing_val': p['swing_val'], 'bos_type': p['e_stype'], 'rev_count': 0,
@@ -1915,7 +1915,7 @@ def check_idm_pending():
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.17 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.19 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
