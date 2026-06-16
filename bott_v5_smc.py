@@ -159,8 +159,8 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
-TRAIL_STOP       = 0.5    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
-TRAIL_ACT_R      = 2.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
+TRAIL_STOP       = 1.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
+TRAIL_ACT_R      = 3.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
@@ -175,15 +175,15 @@ MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — l
 MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
-APPROACH_R       = 1.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
+APPROACH_R       = 3.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.05   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
 INDUCEMENT_ZONE_LO = 0.35 # bos kecil dicari mulai 35% range BOS besar (dari puncak/lembah)
-INDUCEMENT_ZONE_HI = 0.60 # ...sampai 60% range. (pita IDM 35-60%)
+INDUCEMENT_ZONE_HI = 0.99 # ...sampai 60% range. (pita IDM 35-60%)
 INDUCEMENT_TF    = "60"   # timeframe cari inducement: "5"=M5, "60"=H1
 INDUCEMENT_SWING = 1      # ukuran swing bos kecil MINIMUM: 1-1 (mencakup 2-2..4-4 & asimetris otomatis)
 INDUCEMENT_SWING_MAX = 5   # IDM di-SKIP bila kekuatan swing >= ini di KEDUA sisi (= SWING_BARS; skala BOS besar 5-5+)
@@ -193,8 +193,8 @@ REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya I
 # True = entry IDM pakai LIMIT di Fib IDM_LIMIT_FIB dari range candle M5 yg close menembus trigger
 #        (Long: 0%=low,100%=high; Short: 0%=high,100%=low). False = market di harga sweep (lama).
 IDM_LIMIT_ENTRY    = True
-IDM_LIMIT_FIB      = 0.618 # 38.2% dari range candle pemicu
-IDM_LIMIT_EXPIRY_MIN = 30   # batalkan limit IDM jika tak terisi dalam N menit
+IDM_LIMIT_FIB      = 0.50   # 50% range candle H1 yg membentuk trigger IDM
+IDM_CANCEL_MOVE_PCT = 0.10  # batalkan limit IDM jika harga bergerak > N×range BOS dari trigger (bukan expiry waktu)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # === HEDGE MODE ===
@@ -986,36 +986,42 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue                       # sisi IDM ini sudah terbuka / limit sudah terpasang
 
         if IDM_LIMIT_ENTRY:
-            # ENTRY LIMIT di Fib IDM_LIMIT_FIB range candle pemicu (entry lebih bagus saat candle besar)
-            hi_c, lo_c = float(trig['high']), float(trig['low'])
+            # ENTRY LIMIT di IDM_LIMIT_FIB (50%) range CANDLE H1 yg MEMBENTUK trigger IDM
+            # (candle di prot_idx — ujungnya = level trigger, biasanya di ujung IDM). BUKAN candle M5.
+            pidx = idm.get('prot_idx')
+            if pidx is None or pidx < 0 or pidx >= len(df_struct):
+                continue
+            idm_candle = df_struct.iloc[pidx]
+            hi_c, lo_c = float(idm_candle['high']), float(idm_candle['low'])
             rng_c = hi_c - lo_c
             if rng_c <= 0:
                 continue
-            if e_stype == "Long":          # 0%=low,100%=high -> entry di 38.2% dari bawah
+            if e_stype == "Long":          # 0%=low,100%=high
                 entry_p = lo_c + IDM_LIMIT_FIB * rng_c
                 sl_p = entry_p - sl_dist
-            else:                          # Short: 0%=high,100%=low -> entry di 38.2% dari atas
+            else:                          # Short: 0%=high,100%=low
                 entry_p = hi_c - IDM_LIMIT_FIB * rng_c
                 sl_p = entry_p + sl_dist
-            print(f"🎯 {coin}: INDUCEMENT {stype} disapu (level {prot:.6g}) → LIMIT {e_stype} @ "
-                  f"{entry_p:.6g} (Fib {IDM_LIMIT_FIB*100:.1f}% candle M5 {lo_c:.6g}-{hi_c:.6g}) | SL {sl_p:.6g}")
+            print(f"🎯 {coin}: INDUCEMENT {stype} disentuh (level {prot:.6g}) → LIMIT {e_stype} @ "
+                  f"{entry_p:.6g} ({IDM_LIMIT_FIB*100:.0f}% range candle H1 IDM {lo_c:.6g}-{hi_c:.6g} @idx{pidx}) | SL {sl_p:.6g}")
             oid = place_limit_order(coin, side, entry_p, sl_p)
             if oid:
                 idm_pending[_akey(coin, e_stype)] = {
                     'coin': coin, 'side': side, 'e_stype': e_stype, 'order_id': oid,
                     'entry': entry_p, 'sl': sl_p, 'placed_ts': time.time(),
+                    'trigger': prot, 'rng': rng,
                     'swing_val': a['swing_val'], 'choch_level': a['choch_level'],
                     'peak_val': a['peak_val'], 'bos_type': e_stype,
                 }
                 inducement_done[coin] = sig
                 rec = (
-                    f"════ LIMIT INDUCEMENT (Fib {IDM_LIMIT_FIB*100:.1f}%) ════\n"
+                    f"════ LIMIT INDUCEMENT ({IDM_LIMIT_FIB*100:.0f}% range candle H1 IDM) ════\n"
                     f"  {coin} | LIMIT {e_stype} @ {entry_p:.6g} | SL {sl_p:.6g}\n"
                     f"  BOS BESAR ({stype}): break={a['swing_val']:.6g} choch={a['choch_level']:.6g} "
                     f"puncak={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} range={rng:.6g}\n"
                     f"  IDM trigger={prot:.6g}@{idm['prot_idx']} (terakhir-di-pita; semua {[round(x,6) for x in idm.get('all_triggers',[prot])]})\n"
-                    f"  CANDLE M5 pemicu: low={lo_c:.6g} high={hi_c:.6g} close={float(trig['close']):.6g} "
-                    f"→ entry Fib {IDM_LIMIT_FIB*100:.1f}% = {entry_p:.6g}"
+                    f"  CANDLE H1 IDM @idx{pidx}: low={lo_c:.6g} high={hi_c:.6g} "
+                    f"→ entry {IDM_LIMIT_FIB*100:.0f}% = {entry_p:.6g}"
                 )
                 log_entry(rec)
                 if (not ALLOW_HEDGE) and coin in pending:
@@ -1906,16 +1912,28 @@ def check_idm_pending():
             log_entry(f"════ FILL INDUCEMENT {p['e_stype']} {coin} @ {entry:.6g} (limit Fib {IDM_LIMIT_FIB*100:.1f}%) ════")
             del idm_pending[key]
             continue
-        if (time.time() - p['placed_ts']) > IDM_LIMIT_EXPIRY_MIN * 60:
-            if p.get('order_id'):
-                cancel_order(coin, p['order_id'])
-            print(f"⌛ {coin}: LIMIT IDM {p['e_stype']} kadaluarsa ({IDM_LIMIT_EXPIRY_MIN}m) → batal.")
-            del idm_pending[key]
+        # INVALIDASI PERGERAKAN: batal jika harga sudah bergerak > IDM_CANCEL_MOVE_PCT×range
+        # dari trigger ke arah kelanjutan (Short: turun di bawah trig; Long: naik di atas trig).
+        trig = p.get('trigger'); rng = p.get('rng')
+        if trig is not None and rng:
+            thr = trig - IDM_CANCEL_MOVE_PCT * rng if p['e_stype'] == "Short" else trig + IDM_CANCEL_MOVE_PCT * rng
+            df_m5 = get_data(coin, "5", limit=30)
+            if df_m5 is not None and len(df_m5) > 0:
+                seg = df_m5[df_m5['ts'] >= p['placed_ts'] * 1000]
+                if len(seg) > 0:
+                    moved = (float(seg['low'].min()) <= thr) if p['e_stype'] == "Short" \
+                            else (float(seg['high'].max()) >= thr)
+                    if moved:
+                        if p.get('order_id'):
+                            cancel_order(coin, p['order_id'])
+                        print(f"🚫 {coin}: LIMIT IDM {p['e_stype']} batal — harga bergerak "
+                              f">{IDM_CANCEL_MOVE_PCT*100:.0f}% range dari trigger {trig:.6g} (lewat {thr:.6g}).")
+                        del idm_pending[key]
 
 
 def run_bot():
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
-    print(f"CONFIG v9.19 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
+    print(f"CONFIG v9.21 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
           f"gap {('<=%.2f%%' % (MAX_GAP_PCT*100)) if MAX_GAP_PCT > 0 else 'bebas'} | "
           f"SL {('FIXED %.0f%% range' % (SL_CAP_RANGE*100)) if SL_FIXED_RANGE else (('C1, cap %.0f%% range' % (SL_CAP_RANGE*100)) if SL_CAP_RANGE > 0 else 'C1')} | "
