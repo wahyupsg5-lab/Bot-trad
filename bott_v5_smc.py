@@ -603,9 +603,11 @@ def candle_touches_fvg(candle, fvg, stype):
         return candle['high'] >= fvg['bottom'] and not fvg_fully_broken(candle, fvg, stype)
 
 
-def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None):
+def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fresh=None):
     """FVG biasa (TANPA syarat volume): C1/C3 valid, CHOCH filter, zona entry, MAX_GAP, fresh-C1.
-    zone_lo = batas bawah zona (default ENTRY_ZONE_LO). Dipakai utk zona dinamis (>= retrace terdalam)."""
+    zone_lo = batas bawah zona (default ENTRY_ZONE_LO). Dipakai utk zona dinamis (>= retrace terdalam).
+    require_fresh = override REQUIRE_FRESH_C1 global (None = pakai default global)."""
+    fresh_flag = REQUIRE_FRESH_C1 if require_fresh is None else require_fresh
     gaps = get_internal_gaps(df_h1, stype, bos_idx)
     z_lo = ENTRY_ZONE_LO if zone_lo is None else zone_lo
     # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
@@ -645,7 +647,7 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None):
         if ocl > 0 and MAX_GAP_PCT > 0 and gap_size / ocl > MAX_GAP_PCT:
             continue
         # Fresh-C1: tolak kalau C1.close sudah disentuh candle SETELAH C3
-        if REQUIRE_FRESH_C1 and not c1_is_fresh(df_h1, g, stype):
+        if fresh_flag and not c1_is_fresh(df_h1, g, stype):
             continue
         result.append(g)
     return result
@@ -937,8 +939,12 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue
         # BOS besar WAJIB punya FVG di zona (sama syarat dgn jalur FVG limit).
         # Tak ada FVG -> BOS ini tak dipakai untuk entry FVG limit MAUPUN entry IDM.
+        # NB: require_fresh=False -> cek ini cuma soal "BOS-nya valid/pernah ada FVG",
+        # bukan soal FVG-nya masih bisa dientry. Kalau ikut REQUIRE_FRESH_C1 global,
+        # begitu limit FVG TERISI (entry = C1.close, jadi otomatis "disentuh"),
+        # _get_fvgs balik kosong dan IDM jadi ikut mati padahal harusnya berdampingan.
         zlo_fvg = deepest_retrace_lo(df_h1, a['bos_idx'], a['choch_level'], stype)
-        if not _get_fvgs(df_h1, stype, a['bos_idx'], a['choch_level'], zone_lo=zlo_fvg):
+        if not _get_fvgs(df_h1, stype, a['bos_idx'], a['choch_level'], zone_lo=zlo_fvg, require_fresh=False):
             continue
         B = a['B']; rng = a['bos_rng']
         # pita TITIK TRIGGER (level IDM) = 35-55% range BOS besar (dari puncak/lembah ke arah choch)
