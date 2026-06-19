@@ -194,6 +194,13 @@ REQUIRE_IDM_FOR_FVG = True # True = entry FVG limit HANYA bila BOS besar punya I
 #        (Long: 0%=low,100%=high; Short: 0%=high,100%=low). False = market di harga sweep (lama).
 IDM_LIMIT_ENTRY    = True
 IDM_LIMIT_FIB      = 0.50   # 50% range candle H1 yg membentuk trigger IDM
+
+# --- Filter momentum "candle makan candle" sebelum entry limit IDM ---
+# Tujuan: pastikan ada bukti kekuatan buyer/seller asli (bukan cuma sapuan tipis) di
+# leg impulsif (choch->puncak) sebelum mempercayai liquidity di balik IDM tsb.
+INDUCEMENT_MOMENTUM_FILTER = False
+INDUCEMENT_MOMENTUM_MAX_CANDLES = 5   # window maksimum: N candle H1 terbaru (termasuk candle berjalan)
+INDUCEMENT_MOMENTUM_MIN_CANDLES = 3   # kalau candle sejak puncak < ini -> jangan entry (data kurang)
 IDM_CANCEL_MOVE_PCT = 0.10  # batalkan limit IDM jika harga bergerak > N×range BOS dari trigger (bukan expiry waktu)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
@@ -213,7 +220,14 @@ def _akey(coin, e_stype):
 
 SYMBOLS = [
     # 36 coin — sinkron dengan backtest (wait_rev, −INJ)
-    'HANAUSDT', 'XPLUSDT', 'MNTUSDT', 'PLUMEUSDT', 'HYPEUSDT', 'BNBUSDT', 'BELUSDT', 'BERAUSDT', 'DASHUSDT', 'ROSEUSDT', 'DOGEUSDT', 'USUALUSDT', 'TAOUSDT', 'ESPORTSUSDT', 'LABUSDT', 'HUSDT', 'AVAXUSDT', 'REUSDT', '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT', 'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT', 'CFXUSDT', 'UNIUSDT', 'ONDOUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT', 'EIGENUSDT', 'XRPUSDT', 'SOLUSDT', 'CRVUSDT', 'RENDERUSDT', 'XVGUSDT', 'SANDUSDT', 'AXSUSDT', 'IMXUSDT', 'FARTCOINUSDT', 'OPUSDT', '1000PEPEUSDT', 'ENAUSDT', 'TIAUSDT', 'GALAUSDT', 'APEUSDT', 'FLOWUSDT',
+    '1000BONKUSDT', 'JUPUSDT', 'ORCAUSDT', 'AAVEUSDT',
+    'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT',
+    'CFXUSDT', 'APTUSDT', 'UNIUSDT', 'ONDOUSDT', 'SEIUSDT',
+    'DYDXUSDT', 'SUIUSDT', 'XAUTUSDT', 'ALGOUSDT', 'HBARUSDT',
+    'EIGENUSDT',
+    'SHIB1000USDT', 'XRPUSDT', 'SOLUSDT', 'CRVUSDT', 'RENDERUSDT',
+    'XVGUSDT', 'SANDUSDT', 'AXSUSDT', 'IMXUSDT', 'FARTCOINUSDT', 'OPUSDT',
+    '1000PEPEUSDT', 'ENAUSDT', 'TIAUSDT', 'GALAUSDT', 'APEUSDT', 'FLOWUSDT',
 ]
 
 ATR_THRESHOLD = {
@@ -490,6 +504,41 @@ def choch_is_broken(df, bos_idx, choch_level, stype):
         return bool((df['close'].iloc[peak_idx:] > choch_level).any())
 
 
+def momentum_eaten(df_h1, peak_idx, stype):
+    """Cek 'candle makan candle' di leg impulsif BOS besar (`stype`), dari puncak/lembah
+    s/d candle TERBARU (termasuk yg belum close).
+    Window = maks INDUCEMENT_MOMENTUM_MAX_CANDLES candle terbaru, tak boleh lewat `peak_idx`.
+    Kalau jumlah candle di window < INDUCEMENT_MOMENTUM_MIN_CANDLES -> None (data kurang, jangan entry).
+    stype Long -> fokus HIGH dimakan (lower bound jadi referensi baru kalau LOW tertembus duluan).
+    stype Short -> fokus LOW dimakan (upper bound jadi referensi baru kalau HIGH tertembus duluan).
+    'Dimakan' = sisi relevan disentuh ATAU dilewati (>=  / <=), bukan harus tembus.
+    Return True/False/None."""
+    n = len(df_h1)
+    if peak_idx is None or peak_idx < 0 or peak_idx >= n:
+        return None
+    latest_idx = n - 1
+    start_idx = max(peak_idx, latest_idx - (INDUCEMENT_MOMENTUM_MAX_CANDLES - 1))
+    window_size = latest_idx - start_idx + 1
+    if window_size < INDUCEMENT_MOMENTUM_MIN_CANDLES:
+        return None
+    ref_hi = float(df_h1['high'].iloc[start_idx])
+    ref_lo = float(df_h1['low'].iloc[start_idx])
+    for i in range(start_idx + 1, latest_idx + 1):
+        hi = float(df_h1['high'].iloc[i])
+        lo = float(df_h1['low'].iloc[i])
+        if stype == "Long":
+            if hi >= ref_hi:
+                return True          # sisi relevan (atas) dimakan -> sukses
+            if lo <= ref_lo:
+                ref_hi, ref_lo = hi, lo   # sisi bawah tertembus -> range lama tak lagi utuh, reset referensi
+        else:
+            if lo <= ref_lo:
+                return True          # sisi relevan (bawah) dimakan -> sukses
+            if hi >= ref_hi:
+                ref_hi, ref_lo = hi, lo   # sisi atas tertembus -> reset referensi
+    return False
+
+
 def deepest_retrace_lo(df, bos_idx, choch_level, stype):
     """Batas bawah zona entry dinamis = max(ENTRY_ZONE_LO, retrace TERDALAM setelah puncak).
     Area 0..retrace_terdalam sudah dilewati candle retrace -> tak boleh dipakai entry (sudah terisi)."""
@@ -538,7 +587,10 @@ def _gap_vol_fields(df, c3_idx):
     return {**base, 'c3_vol': c3_vol, 'vol_max10h': vol_max}
 
 
-def get_internal_gaps(df, stype, bos_idx, lookback=60):
+def get_internal_gaps(df, stype, bos_idx, lookback=60, require_fresh=True):
+    """require_fresh=True (default) = perilaku lama: gap dibuang kalau ada close SETELAHNYA
+    yang menembus sisi gap (close-based). require_fresh=False = pakai SEMUA gap mentah,
+    soal freshness diserahkan sepenuhnya ke pemanggil (mis. c1_is_fresh di _get_fvgs)."""
     gaps = []
     scan_start = max(2, bos_idx - lookback)
 
@@ -553,9 +605,10 @@ def get_internal_gaps(df, stype, bos_idx, lookback=60):
             gap.update(_gap_vol_fields(df, i))
         if gap:
             is_fresh = True
-            for j in range(i + 1, bos_idx + 1):
-                if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
-                if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
+            if require_fresh:
+                for j in range(i + 1, bos_idx + 1):
+                    if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
+                    if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
             if is_fresh:
                 gaps.append(gap)
 
@@ -572,9 +625,10 @@ def get_internal_gaps(df, stype, bos_idx, lookback=60):
             gap.update(_gap_vol_fields(df, i + 1))
         if gap:
             is_fresh = True
-            for j in range(i + 2, len(df)):
-                if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
-                if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
+            if require_fresh:
+                for j in range(i + 2, len(df)):
+                    if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
+                    if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
             if is_fresh:
                 gaps.append(gap)
 
@@ -601,7 +655,7 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
     zone_lo = batas bawah zona (default ENTRY_ZONE_LO). Dipakai utk zona dinamis (>= retrace terdalam).
     require_fresh = override REQUIRE_FRESH_C1 global (None = pakai default global)."""
     fresh_flag = REQUIRE_FRESH_C1 if require_fresh is None else require_fresh
-    gaps = get_internal_gaps(df_h1, stype, bos_idx)
+    gaps = get_internal_gaps(df_h1, stype, bos_idx, require_fresh=fresh_flag)
     z_lo = ENTRY_ZONE_LO if zone_lo is None else zone_lo
     # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
     gaps = [g for g in gaps
@@ -932,12 +986,17 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue
         # BOS besar WAJIB punya FVG di zona (sama syarat dgn jalur FVG limit).
         # Tak ada FVG -> BOS ini tak dipakai untuk entry FVG limit MAUPUN entry IDM.
-        # NB: require_fresh=False -> cek ini cuma soal "BOS-nya valid/pernah ada FVG",
+        # NB1: require_fresh=False -> cek ini cuma soal "BOS-nya valid/pernah ada FVG",
         # bukan soal FVG-nya masih bisa dientry. Kalau ikut REQUIRE_FRESH_C1 global,
         # begitu limit FVG TERISI (entry = C1.close, jadi otomatis "disentuh"),
         # _get_fvgs balik kosong dan IDM jadi ikut mati padahal harusnya berdampingan.
-        zlo_fvg = deepest_retrace_lo(df_h1, a['bos_idx'], a['choch_level'], stype)
-        if not _get_fvgs(df_h1, stype, a['bos_idx'], a['choch_level'], zone_lo=zlo_fvg, require_fresh=False):
+        # NB2: zone_lo PAKAI STATIS (ENTRY_ZONE_LO), BUKAN deepest_retrace_lo() yg dinamis.
+        # zone_lo dinamis itu utk keperluan PENEMPATAN limit FVG (area yg sudah dilewati
+        # retrace tak dipakai lagi) — floor-nya naik terus seiring retrace makin dalam.
+        # Kalau dipakai di sini, makin dalam retrace (= makin kuat alasan IDM utk entry
+        # reversal), makin besar juga kemungkinan FVG lama "terhapus" dari hasil, sehingga
+        # gate ini malah memblokir IDM justru pas momen yg paling IDM butuhkan.
+        if not _get_fvgs(df_h1, stype, a['bos_idx'], a['choch_level'], zone_lo=ENTRY_ZONE_LO, require_fresh=False):
             continue
         B = a['B']; rng = a['bos_rng']
         # pita TITIK TRIGGER (level IDM) = 35-55% range BOS besar (dari puncak/lembah ke arah choch)
@@ -985,6 +1044,14 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             continue                       # sisi IDM ini sudah terbuka / limit sudah terpasang
 
         if IDM_LIMIT_ENTRY:
+            # Filter momentum: leg impulsif (choch->puncak) WAJIB ada candle yg makan range candle
+            # lain (lihat momentum_eaten()) sblm dipercaya ada liquidity nyata di balik IDM ini.
+            if INDUCEMENT_MOMENTUM_FILTER:
+                eaten = momentum_eaten(df_h1, a['peak_idx'], stype)
+                if eaten is not True:
+                    reason = "data kurang (<min candle sejak puncak)" if eaten is None else "tak ada candle makan candle"
+                    print(f"   {coin}: IDM {stype} skip limit -> momentum filter gagal ({reason})")
+                    continue
             # ENTRY LIMIT di IDM_LIMIT_FIB (50%) range CANDLE H1 yg MEMBENTUK trigger IDM
             # (candle di prot_idx — ujungnya = level trigger, biasanya di ujung IDM). BUKAN candle M5.
             pidx = idm.get('prot_idx')
@@ -1020,7 +1087,8 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                     f"puncak={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} range={rng:.6g}\n"
                     f"  IDM trigger={prot:.6g}@{idm['prot_idx']} (terakhir-di-pita; semua {[round(x,6) for x in idm.get('all_triggers',[prot])]})\n"
                     f"  CANDLE H1 IDM @idx{pidx}: low={lo_c:.6g} high={hi_c:.6g} "
-                    f"→ entry {IDM_LIMIT_FIB*100:.0f}% = {entry_p:.6g}"
+                    f"→ entry {IDM_LIMIT_FIB*100:.0f}% = {entry_p:.6g}\n"
+                    f"  Momentum filter: {'ON, lolos (candle makan candle)' if INDUCEMENT_MOMENTUM_FILTER else 'OFF'}"
                 )
                 log_entry(rec)
                 if (not ALLOW_HEDGE) and coin in pending:
