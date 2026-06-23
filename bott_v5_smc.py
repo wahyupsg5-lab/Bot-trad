@@ -178,7 +178,7 @@ MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembata
 APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # jarak entry->SL = 5% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
@@ -203,6 +203,17 @@ INDUCEMENT_MOMENTUM_MAX_CANDLES = 5   # window maksimum: N candle H1 terbaru (te
 INDUCEMENT_MOMENTUM_MIN_CANDLES = 3   # kalau candle sejak puncak < ini -> jangan entry (data kurang)
 IDM_CANCEL_MOVE_PCT = 0.10  # batalkan limit IDM jika harga bergerak > N×range BOS dari trigger (bukan expiry waktu)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
+
+# --- Filter konfluensi funding rate (window pre-settlement) ---
+# Bybit settle funding 3x sehari: 00:00, 08:00, 16:00 UTC (07:00, 15:00, 23:00 WIB).
+# FUNDING_WINDOW_MIN menit sebelum settlement: blokir pasang limit baru YG GAK SEARAH funding,
+# DAN batalkan limit yg sudah terpasang (FVG pending + IDM idm_pending) yg gak searah.
+# Setelah jam settlement lewat: otomatis normal kembali (tidak perlu restart).
+# Posisi aktif (sudah terisi) TIDAK disentuh.
+FUNDING_FILTER      = False   # True = aktifkan logika window pre-settlement
+FUNDING_MIN_EDGE    = 0.0     # ambang batas rate (fraction). 0.0 = cukup searah saja.
+FUNDING_WINDOW_MIN  = 60      # menit sebelum settlement yg jadi window aktif
+FUNDING_CACHE_TTL   = 300     # detik — cache get_tickers biar tak spam API
 
 # === HEDGE MODE ===
 # True = IDM (market, kebalik arah) + limit FVG (searah BOS) boleh JALAN BARENGAN per koin.
@@ -299,6 +310,7 @@ idm_pending      = {}   # _akey(coin,e_stype) -> limit IDM yg menunggu fill (Fib
 active_positions = {}
 inducement_done  = {}   # coin -> signature struktur BOS besar yg sudah di-entry inducement (anti entry-ulang)
 instrument_cache = {}
+funding_cache    = {}   # symbol -> {'rate': float, 'ts': float} — cache funding rate (TTL=FUNDING_CACHE_TTL)
 done_setups      = {}   # coin -> {swing_val, stype, used_ocl} — cegah re-entry di BOS yang sama
 
 
@@ -354,6 +366,96 @@ def get_instrument_info(symbol):
     return {'min_qty': 0.01, 'qty_step': 0.01, 'tick_size': 0.0001}
 
 
+# ============================================================
+# FUNDING RATE (filter konfluensi)
+# ============================================================
+
+def get_funding_rate(symbol):
+    """Funding rate terkini (fraction, mis. 0.0001 = 0.01%) dari Bybit ticker.
+    Di-cache TTL=FUNDING_CACHE_TTL detik biar tak spam API tiap loop coin.
+    Kalau API gagal: balikin cache lama (kalau ada) drpd None, biar tahan sesaat gangguan jaringan."""
+    now = time.time()
+    cached = funding_cache.get(symbol)
+    if cached and (now - cached['ts']) < FUNDING_CACHE_TTL:
+        return cached['rate']
+    try:
+        res = session.get_tickers(category=CATEGORY, symbol=symbol)
+        if res['retCode'] == 0 and res['result']['list']:
+            rate = float(res['result']['list'][0]['fundingRate'])
+            funding_cache[symbol] = {'rate': rate, 'ts': now}
+            return rate
+        print(f"⚠️ funding_rate {symbol}: {res.get('retMsg','')}")
+    except Exception as e:
+        print(f"⚠️ funding_rate {symbol}: {e}")
+    return cached['rate'] if cached else None
+
+
+def funding_favors(stype, symbol):
+    """True kalau funding rate SAAT INI menguntungkan posisi `stype` ('Long'/'Short') saat settlement.
+    Bybit: rate POSITIF -> Long bayar Short. rate NEGATIF -> Short bayar Long.
+    Kalau rate gagal diambil -> True (jangan blokir entry krn alasan teknis API, bukan krn sinyal funding)."""
+    rate = get_funding_rate(symbol)
+    if rate is None:
+        return True
+    if stype == "Long":
+        return rate <= -FUNDING_MIN_EDGE
+    else:
+        return rate >= FUNDING_MIN_EDGE
+
+
+def in_funding_window():
+    """True kalau sekarang dalam FUNDING_WINDOW_MIN menit sebelum salah satu jam settlement Bybit.
+    Settlement UTC: 00:00, 08:00, 16:00.  Fungsi ini pakai UTC supaya konsisten tanpa peduli TZ server."""
+    import datetime as _dt
+    now_utc = _dt.datetime.utcnow()
+    mins_utc = now_utc.hour * 60 + now_utc.minute
+    for settle_h in (0, 8, 16):
+        settle_mins = settle_h * 60
+        # selisih menit menuju settlement berikutnya (wrap-around 24 jam)
+        diff = (settle_mins - mins_utc) % (24 * 60)
+        if 0 < diff <= FUNDING_WINDOW_MIN:   # 0 dikecualikan: pas detik-detik settlement = sudah lewat
+            return True
+    return False
+
+
+def cancel_unfavorable_limits(coin):
+    """Selama dalam funding window: batalkan limit FVG (pending) & IDM (idm_pending) coin ini
+    yang arahnya GAK SEARAH funding rate sekarang. Posisi aktif tidak disentuh."""
+    import copy
+    # ── FVG limits (pending) ──
+    if coin in pending:
+        dirs_to_remove = []
+        for d, st in list(pending[coin].items()):
+            if st.get('phase') != 'WAIT_FILL':
+                continue                         # WAIT_APPROACH belum punya limit order -> skip
+            stype_limit = st.get('type')
+            if stype_limit and not funding_favors(stype_limit, coin):
+                oid = st.get('order_id')
+                if oid:
+                    cancel_order(coin, oid)
+                dirs_to_remove.append(d)
+                rate = get_funding_rate(coin)
+                print(f"   💸 {coin} FVG {stype_limit}: limit dibatalkan (funding window, rate={rate})")
+        for d in dirs_to_remove:
+            del pending[coin][d]
+        if not pending[coin]:
+            del pending[coin]
+    # ── IDM limits (idm_pending) ──
+    for key in list(idm_pending.keys()):
+        # key = _akey(coin, e_stype) = f"{coin}_{e_stype}"
+        if not key.startswith(coin + "_"):
+            continue
+        e_stype = key[len(coin)+1:]
+        if not funding_favors(e_stype, coin):
+            st = idm_pending[key]
+            oid = st.get('order_id')
+            if oid:
+                cancel_order(coin, oid)
+            del idm_pending[key]
+            rate = get_funding_rate(coin)
+            print(f"   💸 {coin} IDM {e_stype}: limit dibatalkan (funding window, rate={rate})")
+
+
 def round_qty(qty, step):
     step_str  = f'{step:.10f}'.rstrip('0')
     precision = len(step_str.split('.')[-1]) if '.' in step_str else 0
@@ -397,7 +499,10 @@ SUBLEG_BARS = 3
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
-ENTRY_C2_WICK = True    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
+ENTRY_C2_WICK = Trus    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
+# Kalau ENTRY_C2_WICK=True: C2 wick hangus jika C1.close tersentuh LALU harga jalan > N×R ke arah BOS
+# tanpa pernah menyentuh C2 wick terlebih dahulu. 2R = harga sudah "jalan duluan" dan C2 wick terlewat.
+C2_WICK_SKIP_R  = 2.0    # berapa R dari C1.close ke arah BOS sebelum C2 wick dianggap hangus
 REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
@@ -707,6 +812,51 @@ def c1_is_fresh(df, gap, stype):
         if stype == "Short" and float(df['high'].iloc[k]) >= c1c:
             return False
     return True
+
+
+def c2_wick_still_valid(df, gap, stype, sl_dist):
+    """Cek apakah C2 wick masih valid sebagai entry saat ENTRY_C2_WICK=True.
+    Kondisi HANGUS: C1.close sudah tersentuh DAN setelah itu harga jalan ke arah BOS
+    melebihi C2_WICK_SKIP_R × sl_dist dari C1.close, tanpa pernah menyentuh C2 wick duluan.
+    Kondisi VALID: C1.close belum tersentuh (normal/fresh), atau sudah tersentuh tapi
+    harga sempat balik ke C2 wick sebelum lari jauh.
+    sl_dist = jarak SL sebenarnya yg dipakai (10% BOS range)."""
+    c3i = gap.get('c3_idx')
+    c1c = float(gap.get('c1_close', 0))
+    c2_entry = float(gap.get('c2_low' if stype == 'Long' else 'c2_high', 0))
+    if c3i is None or c1c <= 0 or c2_entry <= 0 or sl_dist <= 0:
+        return True   # data kurang -> asumsikan valid, biarkan filter lain yg handle
+
+    skip_threshold = C2_WICK_SKIP_R * sl_dist
+    n = len(df)
+    c1_touched = False
+
+    for k in range(int(c3i) + 1, n):
+        lo = float(df['low'].iloc[k])
+        hi = float(df['high'].iloc[k])
+        if stype == 'Long':
+            if not c1_touched:
+                if lo <= c1c:
+                    c1_touched = True
+                # sebelum C1 tersentuh -> C2 wick pasti belum masalah
+            else:
+                # C1 sudah tersentuh: cek apakah C2 wick sempat tersentuh duluan
+                if lo <= c2_entry:
+                    return True   # harga balik ke C2 wick -> masih valid
+                # cek apakah harga sudah lari ke arah BOS > skip_threshold dari C1.close
+                if hi >= c1c + skip_threshold:
+                    return False  # jalan duluan > 2R -> C2 wick hangus
+        else:  # Short
+            if not c1_touched:
+                if hi >= c1c:
+                    c1_touched = True
+            else:
+                if hi >= c2_entry:
+                    return True   # harga balik ke C2 wick -> masih valid
+                if lo <= c1c - skip_threshold:
+                    return False  # jalan duluan > 2R -> C2 wick hangus
+
+    return True  # tidak ada kondisi hangus terdeteksi di data yg tersedia
 
 
 # ============================================================
@@ -1035,6 +1185,12 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         sl_dist = SL_CAP_RANGE * rng
         if _akey(coin, e_stype) in active_positions or _akey(coin, e_stype) in idm_pending:
             continue                       # sisi IDM ini sudah terbuka / limit sudah terpasang
+
+        # Filter konfluensi funding: blokir pasang limit IDM baru selama funding window AND gak searah.
+        if FUNDING_FILTER and in_funding_window() and not funding_favors(e_stype, coin):
+            rate = get_funding_rate(coin)
+            print(f"   {coin}: IDM {e_stype} skip -> funding window aktif, gak searah (rate={rate})")
+            continue
 
         if IDM_LIMIT_ENTRY:
             # Filter momentum: leg impulsif (choch->puncak) WAJIB ada candle yg makan range candle
@@ -1754,6 +1910,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         entry_adj = c2_h if (ENTRY_C2_WICK and c2_h > 0) else c1_c
         sl_base   = max(c1_h, entry_adj)
         dist = max(sl_base - entry_adj, 0.0) * SL_FRAC; sl_entry = entry_adj + dist
+
     import datetime as _dt
     _h_s = _dt.datetime.utcfromtimestamp(df_h1_live.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in df_h1_live.columns else -1
     if _h_s >= 0:
@@ -1761,6 +1918,12 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         _allowed = SESSION_FILTER.get(coin)
         if _allowed is not None and _sesi not in _allowed:
             return None, None
+    # Filter konfluensi funding: cuma ambil entry baru SELAMA funding window AND gak searah.
+    if FUNDING_FILTER and in_funding_window() and not funding_favors(stype, coin):
+        if verbose:
+            rate = get_funding_rate(coin)
+            print(f"   {coin}: BOS {stype} skip FVG limit -> funding window aktif, gak searah (rate={rate})")
+        return None, None
     # SL: mode FIXED 10% range BOS (di setiap situasi), atau ikut C1 dengan cap 10% range
     if SL_FIXED_RANGE and bos_rng > 0:
         dist = SL_CAP_RANGE * bos_rng
@@ -1786,6 +1949,10 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         'dist': dist, 'orig_ocl': c1_c, 'fvg_list': gaps, 'bos_ts': bos_ts,
         'bos_idx': bos_idx, 'swing_val': swing_val, 'choch_level': choch_level,
         'peak_val': _B, 'swing2': peak_val, 'brk_idx': brk_idx,
+        # C2 wick state: track C1.close touch & max run setelahnya
+        'c2_wick_entry': (c2_l if stype == 'Long' else c2_h) if ENTRY_C2_WICK else None,
+        'c1c_touched': False,   # True = C1.close pernah tersentuh
+        'c1c_run_r':   0.0,     # max R yg dicapai dari C1.close ke arah BOS setelah C1 tersentuh
     }
     return setup, logline
 
@@ -1840,6 +2007,37 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
         print(f"🗑️ {coin} {stype}: Tidak ada FVG tersisa / tidak fresh.")
         return 'remove'
     curr_price = float(curr_h1['close'])
+
+    # ── C2 wick hangus? (hanya kalau ENTRY_C2_WICK=True dan ada c2_wick_entry di setup) ──
+    # Update state: apakah C1.close sudah pernah tersentuh, dan seberapa jauh harga lari
+    # ke arah BOS dari C1.close setelah itu. Kalau >C2_WICK_SKIP_R × dist → setup hangus.
+    if ENTRY_C2_WICK and setup.get('c2_wick_entry') and setup.get('phase') in ('WAIT_APPROACH', 'WAIT_FILL'):
+        c1c_ref  = float(setup.get('orig_ocl', 0))   # C1.close = referensi "disentuh"
+        c2w_e    = float(setup['c2_wick_entry'])
+        sl_dist  = float(setup['dist'])
+        if c1c_ref > 0 and sl_dist > 0:
+            # Deteksi sentuhan C1.close oleh curr_price (pakai curr_h1 high/low bukan hanya close)
+            c1c_hi = float(curr_h1.get('high', curr_price))
+            c1c_lo = float(curr_h1.get('low',  curr_price))
+            if not setup['c1c_touched']:
+                if (stype == 'Long'  and c1c_lo <= c1c_ref) or                    (stype == 'Short' and c1c_hi >= c1c_ref):
+                    setup['c1c_touched'] = True
+                    setup['c1c_run_r']   = 0.0
+            if setup['c1c_touched']:
+                # Track max run ke arah BOS dari C1.close
+                if stype == 'Long':
+                    run_r = (c1c_hi - c1c_ref) / sl_dist
+                else:
+                    run_r = (c1c_ref - c1c_lo) / sl_dist
+                if run_r > setup['c1c_run_r']:
+                    setup['c1c_run_r'] = run_r
+                # Cek hangus: run > C2_WICK_SKIP_R DAN harga saat ini belum di zona C2 wick
+                c2_not_reached = (stype == 'Long'  and curr_price > c2w_e) or                                  (stype == 'Short' and curr_price < c2w_e)
+                if setup['c1c_run_r'] >= C2_WICK_SKIP_R and c2_not_reached:
+                    if setup.get('order_id'): cancel_order(coin, setup['order_id'])
+                    print(f"🚫 {coin} {stype}: C2 wick hangus — harga lari {setup['c1c_run_r']:.2f}R "
+                          f"dari C1.close ({c1c_ref:.6g}) ke arah BOS tanpa sentuh C2 wick ({c2w_e:.6g}).")
+                    return 'remove'
 
     # ── WAIT_APPROACH ──
     if setup['phase'] == 'WAIT_APPROACH':
@@ -2091,6 +2289,9 @@ def run_bot():
         for coin in SYMBOLS:
             try:
                 time.sleep(3)
+                # Funding window: batalkan limit yg gak searah sebelum settlement
+                if FUNDING_FILTER and in_funding_window():
+                    cancel_unfavorable_limits(coin)
                 if (not ALLOW_HEDGE) and coin in active_positions:
                     continue
                 df_h1_live = get_data(coin, "60", limit=100)
