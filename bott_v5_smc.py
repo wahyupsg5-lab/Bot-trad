@@ -499,7 +499,7 @@ SUBLEG_BARS = 3
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
-ENTRY_C2_WICK = Trus    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
+ENTRY_C2_WICK = True    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
 # Kalau ENTRY_C2_WICK=True: C2 wick hangus jika C1.close tersentuh LALU harga jalan > N×R ke arah BOS
 # tanpa pernah menyentuh C2 wick terlebih dahulu. 2R = harga sudah "jalan duluan" dan C2 wick terlewat.
 C2_WICK_SKIP_R  = 2.0    # berapa R dari C1.close ke arah BOS sebelum C2 wick dianggap hangus
