@@ -159,8 +159,8 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
-TRAIL_STOP       = 1.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
-TRAIL_ACT_R      = 3.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
+TRAIL_STOP       = 2.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
+TRAIL_ACT_R      = 4.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
@@ -172,7 +172,7 @@ SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False =
 ENTRY_MODE       = 'fvg_limit'  # limit di zona FVG (satu-satunya jalur)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
 MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — lebar gap tak ngaruh)
-MAX_CONCURRENT   = 5     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
+MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
 APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
@@ -1992,6 +1992,7 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         'type': stype, 'phase': 'WAIT_APPROACH', 'entry': entry_adj, 'sl': sl_entry,
         'dist': dist, 'orig_ocl': entry_adj,   # C3 ujung = trigger sentuhan M5
         'fvg_list': gaps, 'bos_ts': bos_ts, 'bos_rng': bos_rng,
+        'created_ts': time.time(),
         'bos_idx': bos_idx, 'swing_val': swing_val, 'choch_level': choch_level,
         'peak_val': _B, 'swing2': peak_val, 'brk_idx': brk_idx,
         # M5 engulfing monitor state
@@ -2028,7 +2029,15 @@ def check_m5_engulfing(coin, setup, df_m5, bos_rng):
     if c1c <= 0:
         return None
 
-    # ── Init: cari candle M5 PALING AWAL yang menyentuh C1 close (scan maju) ──
+    # ── Filter: hanya proses candle M5 yang terbentuk SETELAH setup dibuat ──
+    # Mencegah bot mereplay engulfing historis saat redeploy.
+    created_ts_ms = setup.get('created_ts', 0) * 1000   # detik → ms
+    if created_ts_ms > 0 and 'ts' in df_m5.columns:
+        df_m5 = df_m5[df_m5['ts'] >= created_ts_ms].reset_index(drop=True)
+        if len(df_m5) < 2:
+            return None   # belum ada candle baru sejak setup dibuat
+
+    # ── Init: cari candle M5 PALING AWAL yang menyentuh trigger (scan maju) ──
     # Scan semua candle kecuali yg berjalan (iloc[-1])
     n = len(df_m5)
     closed_end = n - 1   # index eksklusif: loop sampai < closed_end (tidak termasuk candle berjalan)
