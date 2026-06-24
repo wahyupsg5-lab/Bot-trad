@@ -165,14 +165,14 @@ TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari 
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
-LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+LEVERAGE         = 15     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
 ENTRY_MODE       = 'fvg_limit'  # limit di zona FVG (satu-satunya jalur)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
 MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — lebar gap tak ngaruh)
-MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
+MAX_CONCURRENT   = 5     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
 APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
@@ -198,7 +198,7 @@ IDM_LIMIT_FIB      = 0.50   # 50% range candle H1 yg membentuk trigger IDM
 # --- Filter momentum "candle makan candle" sebelum entry limit IDM ---
 # Tujuan: pastikan ada bukti kekuatan buyer/seller asli (bukan cuma sapuan tipis) di
 # leg impulsif (choch->puncak) sebelum mempercayai liquidity di balik IDM tsb.
-INDUCEMENT_MOMENTUM_FILTER = False
+INDUCEMENT_MOMENTUM_FILTER = True
 INDUCEMENT_MOMENTUM_MAX_CANDLES = 5   # window maksimum: N candle H1 terbaru (termasuk candle berjalan)
 INDUCEMENT_MOMENTUM_MIN_CANDLES = 3   # kalau candle sejak puncak < ini -> jangan entry (data kurang)
 IDM_CANCEL_MOVE_PCT = 0.10  # (lama, hanya aktif kalau IDM_M5_ENGULF=False) batalkan limit IDM jika harga bergerak > N×range BOS dari trigger
@@ -501,18 +501,17 @@ SUBLEG_BARS = 3
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
-ENTRY_C2_WICK = False    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
-# Kalau ENTRY_C2_WICK=True: C2 wick hangus jika C1.close tersentuh LALU harga jalan > N×R ke arah BOS
-# tanpa pernah menyentuh C2 wick terlebih dahulu. 2R = harga sudah "jalan duluan" dan C2 wick terlewat.
-C2_WICK_SKIP_R  = 2.0    # berapa R dari C1.close ke arah BOS sebelum C2 wick dianggap hangus
+# Trigger FVG entry = ujung C3 (low[C3] untuk Long, high[C3] untuk Short = batas gap).
+# Zona golden ratio dihitung dari C3 ujung, bukan C1 close.
+FVG_CANCEL_RANGE_PCT = 0.20   # 20% BOS range dari C3 ujung ke arah BOS → setup hangus
 
-# --- Filter engulfing M5 sebelum entry FVG (hanya mode C1 close / ENTRY_C2_WICK=False) ---
+# --- Filter engulfing M5 sebelum entry FVG (C3 ujung sebagai trigger) ---
 # Saat C1 close H1 tersentuh, bot monitor M5 dan tunggu konfirmasi engulfing sebelum market order.
 # "Candle fokus" = candle M5 pertama yang menyentuh C1 close, lalu bergeser jika ada wick/close
 # yang keluar dari range candle fokus. Entry terjadi saat close candle M5 melewati high candle fokus
 # (Long) atau low candle fokus (Short). SL = low_engulfing - SL_ENGULF_PCT*bos_rng (Long).
 M5_ENGULF_FILTER  = True    # False = skip filter ini, entry langsung market saat C1 close tersentuh
-SL_ENGULF_PCT     = 0.01    # SL = ujung engulfing - N% range BOS (default 5%)
+SL_ENGULF_PCT     = 0.05    # SL = ujung engulfing - N% range BOS (default 5%)
 REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
@@ -768,25 +767,25 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
             gaps = [g for g in gaps if g['bottom'] >= choch_level]
         else:
             gaps = [g for g in gaps if g['top'] <= choch_level]
-    # Filter ZONA ENTRY: C1.close harus di retrace z_lo..HI dari range BOS
-    # 0% = ekstrem impulse (swing terbaru), 100% = CHOCH. Long: zona di bawah; Short: di atas.
+    # Filter ZONA ENTRY: C3 ujung harus di retrace z_lo..HI dari range BOS.
+    # Long: C3 ujung = top gap (low[C3]). Short: C3 ujung = bottom gap (high[C3]).
     if choch_level and len(df_h1) > bos_idx:
         if stype == "Long":
-            B = float(df_h1['high'].iloc[bos_idx:].max())   # impulse high (0%)
-            L = float(choch_level)                          # invalidasi (100%)
+            B = float(df_h1['high'].iloc[bos_idx:].max())
+            L = float(choch_level)
             rng = B - L
             if rng > 0:
-                lo = B - ENTRY_ZONE_HI * rng                # batas terdalam (100%)
-                hi = B - z_lo * rng                         # batas terdangkal (z_lo)
-                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
+                lo = B - ENTRY_ZONE_HI * rng   # batas terdalam (CHOCH)
+                hi = B - z_lo * rng            # batas terdangkal
+                gaps = [g for g in gaps if lo <= g['top'] <= hi]
         else:
-            B = float(df_h1['low'].iloc[bos_idx:].min())    # impulse low (0%)
-            L = float(choch_level)                          # invalidasi (100%)
+            B = float(df_h1['low'].iloc[bos_idx:].min())
+            L = float(choch_level)
             rng = L - B
             if rng > 0:
-                lo = B + z_lo * rng                         # batas terdangkal (z_lo)
-                hi = B + ENTRY_ZONE_HI * rng                # batas terdalam (100%)
-                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
+                lo = B + z_lo * rng            # batas terdangkal
+                hi = B + ENTRY_ZONE_HI * rng   # batas terdalam (CHOCH)
+                gaps = [g for g in gaps if lo <= g['bottom'] <= hi]
     # MAX_GAP_PCT: gap tidak boleh terlalu besar
     result = []
     for g in gaps:
@@ -806,70 +805,27 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
 
 
 def c1_is_fresh(df, gap, stype):
-    """FVG dianggap hangus (tidak fresh) hanya jika KEDUA kondisi terpenuhi:
-    1. Ada candle setelah C3 yang menyentuh ujung wick C1 (= bottom gap untuk Long,
-       top gap untuk Short) — artinya gap sudah 100% terisi secara harga.
-    2. Setelah itu, harga jalan ke arah BOS sejauh >= C2_WICK_SKIP_R × SL_dist
-       (default 2R) TANPA sempat menyentuh entry C2 wick lebih dulu.
-    Kalau hanya kondisi 1 terpenuhi (gap terisi tapi harga balik ke C2 wick),
-    FVG masih valid — entry C2 wick tetap bisa dipakai."""
+    """FVG hangus jika setelah puncak terbentuk ada candle yang menyentuh ujung wick C1
+    (bottom gap untuk Long = high[C1], top gap untuk Short = low[C1]) — gap sudah 100% terisi.
+    Cek dimulai SETELAH peak_idx karena leg impulsif ke puncak wajar melewati area C1."""
     c3i = gap.get('c3_idx')
     if c3i is None:
         return True
-    # Threshold sentuhan: ujung wick C1 yang membentuk tepi gap
+    peak_idx = gap.get('_peak_idx')
+    start_k  = (int(peak_idx) + 1) if peak_idx is not None else (int(c3i) + 1)
+    start_k  = max(start_k, int(c3i) + 1)
     if stype == "Long":
-        c1_wick = float(gap.get('bottom', 0))      # high[C1] = bottom gap
-        c2_entry = float(gap.get('c2_low', 0))     # entry C2 wick untuk Long
+        c1_wick = float(gap.get('bottom', 0))   # high[C1]
     else:
-        c1_wick = float(gap.get('top', 0))          # low[C1] = top gap
-        c2_entry = float(gap.get('c2_high', 0))    # entry C2 wick untuk Short
+        c1_wick = float(gap.get('top', 0))       # low[C1]
     if c1_wick <= 0:
         return True
-    # SL dist = SL_CAP_RANGE * bos_rng tidak tersedia di sini, pakai gap size sebagai proxy
-    # (gap size ~ jarak antara C1 wick dan C3, cukup proporsional dengan BOS range kecil)
-    # Idealnya sl_dist dikirim sebagai arg, tapi untuk menjaga signature lama, pakai fallback:
-    gap_size = abs(float(gap.get('top', 0)) - float(gap.get('bottom', 0)))
-    sl_proxy = gap.get('_sl_dist', gap_size)    # _sl_dist diinjek dari _get_fvgs kalau tersedia
-    skip_thresh = C2_WICK_SKIP_R * sl_proxy if sl_proxy > 0 else float('inf')
-    wick_touched = False
-    for k in range(int(c3i) + 1, len(df)):
-        lo = float(df['low'].iloc[k])
-        hi = float(df['high'].iloc[k])
-        if stype == "Long":
-            if not wick_touched:
-                # Cek sentuhan wick lebih dulu
-                if lo <= c1_wick:
-                    wick_touched = True
-                    # Dalam candle yang sama: setelah wick tersentuh, cek apakah harga
-                    # sudah lari ke atas 2R dari c1_wick
-                    if hi >= c1_wick + skip_thresh:
-                        return False  # wick tersentuh DAN lari 2R di candle sama -> hangus
-                else:
-                    # Wick belum tersentuh, tapi harga sudah lari jauh ke atas (entry terlewat)
-                    if hi >= c1_wick + skip_thresh:
-                        return False  # entry C2 wick terlewat -> hangus
-            else:
-                # C1 wick sudah tersentuh: cek apakah harga sempat turun ke C2 wick
-                if c2_entry > 0 and lo <= c2_entry:
-                    return True   # balik ke C2 wick -> masih valid
-                if hi >= c1_wick + skip_thresh:
-                    return False  # jalan duluan setelah wick -> hangus
-        else:
-            if not wick_touched:
-                if hi >= c1_wick:
-                    wick_touched = True
-                    if lo <= c1_wick - skip_thresh:
-                        return False
-                else:
-                    if lo <= c1_wick - skip_thresh:
-                        return False
-            else:
-                if c2_entry > 0 and hi >= c2_entry:
-                    return True
-                if lo <= c1_wick - skip_thresh:
-                    return False
-    return True   # belum ada kondisi hangus -> masih valid
-
+    for k in range(start_k, len(df)):
+        if stype == "Long" and float(df['low'].iloc[k]) <= c1_wick:
+            return False
+        if stype == "Short" and float(df['high'].iloc[k]) >= c1_wick:
+            return False
+    return True
 
 def c2_wick_still_valid(df, gap, stype, sl_dist):
     """Cek apakah C2 wick masih valid sebagai entry saat ENTRY_C2_WICK=True.
@@ -884,7 +840,7 @@ def c2_wick_still_valid(df, gap, stype, sl_dist):
     if c3i is None or c1c <= 0 or c2_entry <= 0 or sl_dist <= 0:
         return True   # data kurang -> asumsikan valid, biarkan filter lain yg handle
 
-    skip_threshold = C2_WICK_SKIP_R * sl_dist
+    skip_threshold = 2.0 * sl_dist
     n = len(df)
     c1_touched = False
 
@@ -1982,19 +1938,16 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     bos_ts = df_h1_live['ts'].iloc[bos_idx]
     g0 = gaps[0]
     c1_c = float(g0.get('c1_close', 0)); c1_l = float(g0.get('c1_low', 0)); c1_h = float(g0.get('c1_high', 0))
-    c2_l = float(g0.get('c2_low', 0));   c2_h = float(g0.get('c2_high', 0))
     if not (c1_c > 0 and c1_h > c1_l):
         return None, None
     gap_s = float(g0['top']) - float(g0['bottom'])
+    # Trigger entry = ujung C3 (batas gap: top untuk Long, bottom untuk Short)
     if stype == 'Long':
-        # Entry = ujung wick C2 (low). SL = invalidasi C1.low. Fallback C1.close bila C2 invalid.
-        entry_adj = c2_l if (ENTRY_C2_WICK and c2_l > 0) else c1_c
-        sl_base   = min(c1_l, entry_adj)            # SL tak boleh di atas entry
-        dist = max(entry_adj - sl_base, 0.0) * SL_FRAC; sl_entry = entry_adj - dist
+        entry_adj = float(g0['top'])      # low[C3]
+        dist = 0.0; sl_entry = entry_adj  # akan di-override SL_FIXED_RANGE di bawah
     else:
-        entry_adj = c2_h if (ENTRY_C2_WICK and c2_h > 0) else c1_c
-        sl_base   = max(c1_h, entry_adj)
-        dist = max(sl_base - entry_adj, 0.0) * SL_FRAC; sl_entry = entry_adj + dist
+        entry_adj = float(g0['bottom'])   # high[C3]
+        dist = 0.0; sl_entry = entry_adj
 
     import datetime as _dt
     _h_s = _dt.datetime.utcfromtimestamp(df_h1_live.iloc[-1]['ts_ms'] / 1000).hour if 'ts_ms' in df_h1_live.columns else -1
@@ -2031,14 +1984,11 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
                f"dist:{dist/c1_c*100:.3f}% (SL {_slr:.1f}% range) Gap:{gap_s/c1_c*100:.3f}%")
     setup = {
         'type': stype, 'phase': 'WAIT_APPROACH', 'entry': entry_adj, 'sl': sl_entry,
-        'dist': dist, 'orig_ocl': c1_c, 'fvg_list': gaps, 'bos_ts': bos_ts,
+        'dist': dist, 'orig_ocl': entry_adj,   # C3 ujung = trigger sentuhan M5
+        'fvg_list': gaps, 'bos_ts': bos_ts, 'bos_rng': bos_rng,
         'bos_idx': bos_idx, 'swing_val': swing_val, 'choch_level': choch_level,
         'peak_val': _B, 'swing2': peak_val, 'brk_idx': brk_idx,
-        # C2 wick state: track C1.close touch & max run setelahnya
-        'c2_wick_entry': (c2_l if stype == 'Long' else c2_h) if ENTRY_C2_WICK else None,
-        'c1c_touched': False,   # True = C1.close pernah tersentuh
-        'c1c_run_r':   0.0,     # max R yg dicapai dari C1.close ke arah BOS setelah C1 tersentuh
-        # M5 engulfing monitor state (hanya mode C1 close)
+        # M5 engulfing monitor state
         'm5_c1c_touched': False,
         'm5_focus_hi': 0.0, 'm5_focus_lo': 0.0, 'm5_focus_idx': 0,
     }
@@ -2170,53 +2120,35 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
         return 'remove'
     curr_price = float(curr_h1['close'])
 
-    # ── C2 wick hangus? (hanya kalau ENTRY_C2_WICK=True dan ada c2_wick_entry di setup) ──
-    # Update state: apakah C1.close sudah pernah tersentuh, dan seberapa jauh harga lari
-    # ke arah BOS dari C1.close setelah itu. Kalau >C2_WICK_SKIP_R × dist → setup hangus.
-    if ENTRY_C2_WICK and setup.get('c2_wick_entry') and setup.get('phase') in ('WAIT_APPROACH', 'WAIT_FILL'):
-        c1c_ref  = float(setup.get('orig_ocl', 0))   # C1.close = referensi "disentuh"
-        c2w_e    = float(setup['c2_wick_entry'])
-        sl_dist  = float(setup['dist'])
-        if c1c_ref > 0 and sl_dist > 0:
-            # Deteksi sentuhan C1.close oleh curr_price (pakai curr_h1 high/low bukan hanya close)
-            c1c_hi = float(curr_h1.get('high', curr_price))
-            c1c_lo = float(curr_h1.get('low',  curr_price))
-            if not setup['c1c_touched']:
-                if (stype == 'Long'  and c1c_lo <= c1c_ref) or                    (stype == 'Short' and c1c_hi >= c1c_ref):
-                    setup['c1c_touched'] = True
-                    setup['c1c_run_r']   = 0.0
-            if setup['c1c_touched']:
-                # Track max run ke arah BOS dari C1.close
-                if stype == 'Long':
-                    run_r = (c1c_hi - c1c_ref) / sl_dist
-                else:
-                    run_r = (c1c_ref - c1c_lo) / sl_dist
-                if run_r > setup['c1c_run_r']:
-                    setup['c1c_run_r'] = run_r
-                # Cek hangus: run > C2_WICK_SKIP_R DAN harga saat ini belum di zona C2 wick
-                c2_not_reached = (stype == 'Long'  and curr_price > c2w_e) or                                  (stype == 'Short' and curr_price < c2w_e)
-                if setup['c1c_run_r'] >= C2_WICK_SKIP_R and c2_not_reached:
-                    if setup.get('order_id'): cancel_order(coin, setup['order_id'])
-                    print(f"🚫 {coin} {stype}: C2 wick hangus — harga lari {setup['c1c_run_r']:.2f}R "
-                          f"dari C1.close ({c1c_ref:.6g}) ke arah BOS tanpa sentuh C2 wick ({c2w_e:.6g}).")
-                    return 'remove'
+    # ── Cek FVG setup hangus: harga lari >= 20% BOS range dari C3 ujung ke arah BOS ──
+    if setup.get('phase') == 'WAIT_APPROACH' and setup.get('bos_rng', 0) > 0:
+        c3_trig      = float(setup.get('orig_ocl', 0))
+        cancel_dist  = FVG_CANCEL_RANGE_PCT * float(setup['bos_rng'])
+        if c3_trig > 0 and cancel_dist > 0:
+            hi_now = float(curr_h1.get('high', curr_price))
+            lo_now = float(curr_h1.get('low',  curr_price))
+            hangus = (stype == 'Long'  and lo_now <= c3_trig - cancel_dist) or                      (stype == 'Short' and hi_now >= c3_trig + cancel_dist)
+            if hangus:
+                print(f"🚫 {coin} {stype}: FVG hangus — harga lari "
+                      f">={FVG_CANCEL_RANGE_PCT*100:.0f}% range BOS dari C3 ujung "
+                      f"({c3_trig:.6g}) ke arah BOS tanpa engulfing.")
+                return 'remove'
 
     # ── WAIT_APPROACH ──
     if setup['phase'] == 'WAIT_APPROACH':
         entry = setup['entry']; dist = setup['dist']
         side_order = "Buy" if stype == "Long" else "Sell"
 
-        # ── PATH A: C1 close mode + M5_ENGULF_FILTER ──
-        # Monitor dimulai begitu C1 close tersentuh di M5. Tidak pakai APPROACH_R.
-        # Batal hanya jika CHOCH ditembus (ditangani di atas oleh choch_is_broken).
-        if not ENTRY_C2_WICK and M5_ENGULF_FILTER and df_m5 is not None:
-            c1c     = float(setup.get('orig_ocl', entry))
-            bos_rng = abs(float(setup.get('peak_val') or 0) - float(setup.get('choch_level') or 0))
+        # ── PATH A: FVG monitor M5 setelah C3 ujung tersentuh ──
+        # Tidak pakai APPROACH_R. Monitor dimulai begitu C3 ujung tersentuh di M5.
+        if M5_ENGULF_FILTER and df_m5 is not None:
+            c3_trig = float(setup.get('orig_ocl', entry))
+            bos_rng = float(setup.get('bos_rng') or abs(float(setup.get('peak_val') or 0) - float(setup.get('choch_level') or 0)))
             if setup.get('m5_c1c_touched'):
-                print(f"\U0001f441\ufe0f  {coin} {stype} | now:{curr_price:.6f} C1.close:{c1c:.6f} | monitor engulfing M5...")
+                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C3.ujung:{c3_trig:.6f} | monitor engulfing M5...")
             else:
-                print(f"\U0001f441\ufe0f  {coin} {stype} | now:{curr_price:.6f} C1.close:{c1c:.6f} | "
-                      f"menunggu sentuhan C1.close (jarak {abs(curr_price-c1c):.6f})")
+                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C3.ujung:{c3_trig:.6f} | "
+                      f"menunggu sentuhan (jarak {abs(curr_price-c3_trig):.6f})")
             active_count = len(active_positions) + _count_slots()
             if active_count >= MAX_CONCURRENT:
                 print(f"\u23f8\ufe0f  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
@@ -2273,7 +2205,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
                     return 'fill'
             return 'keep'
 
-        # ── PATH B: Limit biasa (C2 wick atau M5_ENGULF_FILTER=False) ──
+        # ── PATH B: Fallback limit (M5_ENGULF_FILTER=False) ──
         thr = APPROACH_R * dist
         approaching = (stype == 'Long'  and curr_price <= entry + thr) or                       (stype == 'Short' and curr_price >= entry - thr)
         r_now  = ((curr_price - entry) if stype == 'Long' else (entry - curr_price)) / dist if dist > 0 else 0
@@ -2616,7 +2548,7 @@ def run_bot():
                 closed_h1 = df_h1_live.iloc[-2]
                 curr_h1   = df_h1_live.iloc[-1]
                 # Fetch M5 hanya jika ada setup C1 close yang sedang monitor engulfing
-                _need_m5 = (not ENTRY_C2_WICK) and M5_ENGULF_FILTER and coin in pending
+                _need_m5 = M5_ENGULF_FILTER and coin in pending
                 df_m5_live = get_data(coin, "5", limit=300) if _need_m5 else None
 
                 # ── INDUCEMENT ENTRY (market, kebalik arah; berdampingan dgn limit FVG) ──
