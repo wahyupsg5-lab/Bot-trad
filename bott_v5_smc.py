@@ -178,7 +178,7 @@ MAX_CONCURRENT   = 5     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas
 APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
 REQUIRE_BOS      = True   # SMC inti: WAJIB BOS H1 dulu
 SL_FRAC          = 1.0    # SL penuh di invalidation C1 low/high (standar SMC)
-SL_CAP_RANGE     = 0.10   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
+SL_CAP_RANGE     = 0.01   # jarak entry->SL = 10% range BOS (lihat SL_FIXED_RANGE)
 SL_FIXED_RANGE   = True   # True = SL SELALU 10% range BOS (abaikan C1); False = SL ikut C1, di-cap 10% range
 MIN_DIST_FLOOR   = True   # True = dist kecil pakai SL minimum 0.2% (bukan di-skip)
 INDUCEMENT_ENTRY = True   # True = aktif entry inducement (market, kebalik arah BOS besar) berdampingan dgn limit FVG
@@ -198,7 +198,7 @@ IDM_LIMIT_FIB      = 0.50   # 50% range candle H1 yg membentuk trigger IDM
 # --- Filter momentum "candle makan candle" sebelum entry limit IDM ---
 # Tujuan: pastikan ada bukti kekuatan buyer/seller asli (bukan cuma sapuan tipis) di
 # leg impulsif (choch->puncak) sebelum mempercayai liquidity di balik IDM tsb.
-INDUCEMENT_MOMENTUM_FILTER = True
+INDUCEMENT_MOMENTUM_FILTER = False
 INDUCEMENT_MOMENTUM_MAX_CANDLES = 5   # window maksimum: N candle H1 terbaru (termasuk candle berjalan)
 INDUCEMENT_MOMENTUM_MIN_CANDLES = 3   # kalau candle sejak puncak < ini -> jangan entry (data kurang)
 IDM_CANCEL_MOVE_PCT = 0.10  # (lama, hanya aktif kalau IDM_M5_ENGULF=False) batalkan limit IDM jika harga bergerak > N×range BOS dari trigger
@@ -511,7 +511,7 @@ FVG_CANCEL_RANGE_PCT = 0.20   # 20% BOS range dari C3 ujung ke arah BOS → setu
 # yang keluar dari range candle fokus. Entry terjadi saat close candle M5 melewati high candle fokus
 # (Long) atau low candle fokus (Short). SL = low_engulfing - SL_ENGULF_PCT*bos_rng (Long).
 M5_ENGULF_FILTER  = True    # False = skip filter ini, entry langsung market saat C1 close tersentuh
-SL_ENGULF_PCT     = 0.05    # SL = ujung engulfing - N% range BOS (default 5%)
+SL_ENGULF_PCT     = 0.01    # SL = ujung engulfing - N% range BOS (default 5%)
 REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
@@ -1115,13 +1115,19 @@ def place_market_entry(coin, side, curr_price, sl_p, tp_p):
         if required_margin > avail * 0.85:
             print(f"⚠️ {coin}: induce margin ~${required_margin:.2f} > avail ${avail:.2f}, skip."); return None, None
         tick = info['tick_size']
-        sl_r = round_price(sl_p, tick); tp_r = round_price(tp_p, tick)
-        res = session.place_order(category=CATEGORY, symbol=coin, side=side,
-                                  orderType="Market", qty=str(qty),
-                                  stopLoss=str(sl_r), takeProfit=str(tp_r),
-                                  positionIdx=_pidx(side), timeInForce="IOC")
+        sl_r = round_price(sl_p, tick)
+        order_kwargs = dict(category=CATEGORY, symbol=coin, side=side,
+                            orderType="Market", qty=str(qty),
+                            stopLoss=str(sl_r), positionIdx=_pidx(side), timeInForce="IOC")
+        if tp_p is not None:
+            tp_r = round_price(tp_p, tick)
+            order_kwargs['takeProfit'] = str(tp_r)
+        else:
+            tp_r = None
+        res = session.place_order(**order_kwargs)
         if res['retCode'] == 0:
-            print(f"   induce filled: qty {qty} SL {sl_r} TP {tp_r} (margin ~${required_margin:.2f}, risk ${risk_usd:.2f})")
+            print(f"   market entry: qty {qty} SL {sl_r}" + (f" TP {tp_r}" if tp_r else "") +
+                  f" (margin ~${required_margin:.2f}, risk ${risk_usd:.2f})")
             return res['result']['orderId'], qty
         print(f"⚠️ {coin}: induce order ditolak → {res.get('retMsg','')} (code:{res['retCode']})")
         return None, None
