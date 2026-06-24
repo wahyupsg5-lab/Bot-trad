@@ -165,14 +165,14 @@ TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari 
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
-LEVERAGE         = 15     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
 ENTRY_MODE       = 'fvg_limit'  # limit di zona FVG (satu-satunya jalur)
 TOUCH_VOL_MIN    = 0.8    # touch candle volume min (× avg 20 M5 candle) — hanya dipakai fvg_sbr
 MAX_GAP_PCT      = 0.0    # 0 = TANPA BATAS gap (entry=C1.close, SL=C1.low — lebar gap tak ngaruh)
-MAX_CONCURRENT   = 5     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
+MAX_CONCURRENT   = 12     # PLAFON KEAMANAN posisi bersamaan (backstop). Pembatas utama = MARGIN.
                           # ⚠️ tiap posisi risiko ~1% → 12 posisi = ~12% jika semua kena SL serentak
                           #    (alt sering jatuh berkorelasi!). Turunkan kalau mau lebih aman.
 APPROACH_R       = 2.0    # place limit saat harga dalam 1R dari entry (ujung wick C2)
@@ -198,10 +198,12 @@ IDM_LIMIT_FIB      = 0.50   # 50% range candle H1 yg membentuk trigger IDM
 # --- Filter momentum "candle makan candle" sebelum entry limit IDM ---
 # Tujuan: pastikan ada bukti kekuatan buyer/seller asli (bukan cuma sapuan tipis) di
 # leg impulsif (choch->puncak) sebelum mempercayai liquidity di balik IDM tsb.
-INDUCEMENT_MOMENTUM_FILTER = True
+INDUCEMENT_MOMENTUM_FILTER = False
 INDUCEMENT_MOMENTUM_MAX_CANDLES = 5   # window maksimum: N candle H1 terbaru (termasuk candle berjalan)
 INDUCEMENT_MOMENTUM_MIN_CANDLES = 3   # kalau candle sejak puncak < ini -> jangan entry (data kurang)
-IDM_CANCEL_MOVE_PCT = 0.10  # batalkan limit IDM jika harga bergerak > N×range BOS dari trigger (bukan expiry waktu)
+IDM_CANCEL_MOVE_PCT = 0.10  # (lama, hanya aktif kalau IDM_M5_ENGULF=False) batalkan limit IDM jika harga bergerak > N×range BOS dari trigger
+IDM_M5_ENGULF       = True  # True = setelah trigger tersapu, monitor M5 engulfing dulu sebelum market entry
+IDM_CANCEL_RANGE_PCT= 0.20  # hangus permanen jika harga >N×range BOS dari trigger ke arah mana pun (IDM_M5_ENGULF=True)
 REQUIRE_FRESH_C1 = True    # True = tolak FVG bila C1.close sudah disentuh candle SETELAH C3 (zona tak fresh)
 
 # --- Filter konfluensi funding rate (window pre-settlement) ---
@@ -499,10 +501,18 @@ SUBLEG_BARS = 3
 # Mis. 0.50..1.00 = hanya zona "diskon" (separuh lebih dalam menuju CHOCH).
 ENTRY_ZONE_LO = 0.618   # golden ratio / OTE — C1.close minimal retrace 61.8%
 ENTRY_ZONE_HI = 1.00
-ENTRY_C2_WICK = True    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
+ENTRY_C2_WICK = False    # True = entry di ujung wick C2 (low utk Long / high utk Short). False = C1.close (lama)
 # Kalau ENTRY_C2_WICK=True: C2 wick hangus jika C1.close tersentuh LALU harga jalan > N×R ke arah BOS
 # tanpa pernah menyentuh C2 wick terlebih dahulu. 2R = harga sudah "jalan duluan" dan C2 wick terlewat.
 C2_WICK_SKIP_R  = 2.0    # berapa R dari C1.close ke arah BOS sebelum C2 wick dianggap hangus
+
+# --- Filter engulfing M5 sebelum entry FVG (hanya mode C1 close / ENTRY_C2_WICK=False) ---
+# Saat C1 close H1 tersentuh, bot monitor M5 dan tunggu konfirmasi engulfing sebelum market order.
+# "Candle fokus" = candle M5 pertama yang menyentuh C1 close, lalu bergeser jika ada wick/close
+# yang keluar dari range candle fokus. Entry terjadi saat close candle M5 melewati high candle fokus
+# (Long) atau low candle fokus (Short). SL = low_engulfing - SL_ENGULF_PCT*bos_rng (Long).
+M5_ENGULF_FILTER  = True    # False = skip filter ini, entry langsung market saat C1 close tersentuh
+SL_ENGULF_PCT     = 0.05    # SL = ujung engulfing - N% range BOS (default 5%)
 REBREAK_INVALID = True  # True = BOS batal bila harga retrace >= RETRACE_LOCK lalu close lewati swing-2 (struktur baru)
 ZONE_FROM_RETRACE = True # True = batas bawah zona entry = max(61.8%, retrace terdalam); area yg sudah dilewati retrace tak dipakai
 RETRACE_LOCK    = 0.50  # ambang retrace yang "mengunci" swing-2 sebagai puncak (50% range BOS)
@@ -685,48 +695,36 @@ def _gap_vol_fields(df, c3_idx):
     return {**base, 'c3_vol': c3_vol, 'vol_max10h': vol_max}
 
 
-def get_internal_gaps(df, stype, bos_idx, lookback=60, require_fresh=True):
-    """require_fresh=True (default) = perilaku lama: gap dibuang kalau ada close SETELAHNYA
-    yang menembus sisi gap (close-based). require_fresh=False = pakai SEMUA gap mentah,
-    soal freshness diserahkan sepenuhnya ke pemanggil (mis. c1_is_fresh di _get_fvgs)."""
+def get_internal_gaps(df, stype, bos_idx, lookback=60, require_fresh=True, peak_idx=None):
+    """Scan FVG dari bos_idx (CHOCH) sampai peak_idx (puncak) — leg impulsif saja.
+    Kalau peak_idx=None, scan sampai akhir data (perilaku lama untuk caller lain).
+    require_fresh=True: cek apakah FVG sudah terisi (candle dalam range menyentuh bottom/top gap).
+    require_fresh=False: semua gap mentah tanpa filter, freshness diserahkan ke pemanggil."""
     gaps = []
-    scan_start = max(2, bos_idx - lookback)
+    # Batas akhir scan: peak_idx kalau tersedia, else akhir data
+    scan_end = (peak_idx - 1) if (peak_idx is not None and peak_idx > bos_idx) else (len(df) - 2)
+    scan_end = min(scan_end, len(df) - 2)
 
-    # Pre-BOS FVG  (C1=i-2, C2=i-1, C3=i)
-    for i in range(bos_idx - 1, scan_start, -1):
-        gap = None
-        if stype == "Long" and df['high'].iloc[i-2] < df['low'].iloc[i]:
-            gap = {"top": df['low'].iloc[i], "bottom": df['high'].iloc[i-2], "zone": "pre"}
-            gap.update(_gap_vol_fields(df, i))
-        elif stype == "Short" and df['low'].iloc[i-2] > df['high'].iloc[i]:
-            gap = {"top": df['low'].iloc[i-2], "bottom": df['high'].iloc[i], "zone": "pre"}
-            gap.update(_gap_vol_fields(df, i))
-        if gap:
-            is_fresh = True
-            if require_fresh:
-                for j in range(i + 1, bos_idx + 1):
-                    if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
-                    if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
-            if is_fresh:
-                gaps.append(gap)
-
-    # Post-BOS FVG  (C1=i-1, C2=i, C3=i+1)
-    post_end = len(df) - 2
-    for i in range(bos_idx + 1, post_end):
+    # Scan FVG dari bos_idx sampai scan_end (CHOCH → puncak)
+    # C1=i-1, C2=i, C3=i+1  →  i mulai dari bos_idx+1
+    for i in range(bos_idx + 1, scan_end + 1):
         if i + 1 >= len(df): continue
         gap = None
         if stype == "Long" and df['high'].iloc[i-1] < df['low'].iloc[i+1]:
-            gap = {"top": df['low'].iloc[i+1], "bottom": df['high'].iloc[i-1], "zone": "post"}
+            gap = {"top": df['low'].iloc[i+1], "bottom": df['high'].iloc[i-1], "zone": "impulse"}
             gap.update(_gap_vol_fields(df, i + 1))
         elif stype == "Short" and df['low'].iloc[i-1] > df['high'].iloc[i+1]:
-            gap = {"top": df['low'].iloc[i-1], "bottom": df['high'].iloc[i+1], "zone": "post"}
+            gap = {"top": df['low'].iloc[i-1], "bottom": df['high'].iloc[i+1], "zone": "impulse"}
             gap.update(_gap_vol_fields(df, i + 1))
         if gap:
             is_fresh = True
             if require_fresh:
-                for j in range(i + 2, len(df)):
-                    if stype == "Long"  and df['close'].iloc[j] < gap['bottom']: is_fresh = False; break
-                    if stype == "Short" and df['close'].iloc[j] > gap['top']:    is_fresh = False; break
+                # Cek apakah ada candle SETELAH C3 (dalam range s/d peak_idx) yang menutup gap
+                check_end = (peak_idx + 1) if peak_idx is not None else len(df)
+                check_end = min(check_end, len(df))
+                for j in range(i + 2, check_end):
+                    if stype == "Long"  and df['low'].iloc[j]  <= gap['bottom']: is_fresh = False; break
+                    if stype == "Short" and df['high'].iloc[j] >= gap['top']:    is_fresh = False; break
             if is_fresh:
                 gaps.append(gap)
 
@@ -753,7 +751,12 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
     zone_lo = batas bawah zona (default ENTRY_ZONE_LO). Dipakai utk zona dinamis (>= retrace terdalam).
     require_fresh = override REQUIRE_FRESH_C1 global (None = pakai default global)."""
     fresh_flag = REQUIRE_FRESH_C1 if require_fresh is None else require_fresh
-    gaps = get_internal_gaps(df_h1, stype, bos_idx, require_fresh=fresh_flag)
+    # peak_idx: high/low tertinggi setelah bos_idx — batas atas scan FVG (CHOCH→puncak)
+    if stype == "Long":
+        peak_idx_fvg = int(df_h1['high'].iloc[bos_idx:].idxmax()) if len(df_h1) > bos_idx else None
+    else:
+        peak_idx_fvg = int(df_h1['low'].iloc[bos_idx:].idxmin()) if len(df_h1) > bos_idx else None
+    gaps = get_internal_gaps(df_h1, stype, bos_idx, require_fresh=fresh_flag, peak_idx=peak_idx_fvg)
     z_lo = ENTRY_ZONE_LO if zone_lo is None else zone_lo
     # FVG biasa: cukup field C1 (entry) & C3 (OCL) valid — tanpa syarat volume "kuat"
     gaps = [g for g in gaps
@@ -791,27 +794,81 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
         ocl      = float(g.get('c3_open', g['bottom'] if stype == 'Short' else g['top']))
         if ocl > 0 and MAX_GAP_PCT > 0 and gap_size / ocl > MAX_GAP_PCT:
             continue
-        # Fresh-C1: tolak kalau C1.close sudah disentuh candle SETELAH C3
-        if fresh_flag and not c1_is_fresh(df_h1, g, stype):
-            continue
+        # Fresh-C1: cek apakah FVG masih valid (ujung wick C1 belum tersentuh,
+        # atau sudah tersentuh tapi harga belum lari 2R ke arah BOS).
+        # Injek _sl_dist ke gap dict agar c1_is_fresh bisa pakai BOS range yg akurat.
+        if fresh_flag:
+            g['_sl_dist'] = SL_CAP_RANGE * rng if rng > 0 else 0
+            if not c1_is_fresh(df_h1, g, stype):
+                continue
         result.append(g)
     return result
 
 
 def c1_is_fresh(df, gap, stype):
-    """C1 fresh = belum ada candle SETELAH C3 (termasuk candle TERBARU walau belum close)
-    yang menyentuh C1.close. Long: low <= c1_close. Short: high >= c1_close."""
+    """FVG dianggap hangus (tidak fresh) hanya jika KEDUA kondisi terpenuhi:
+    1. Ada candle setelah C3 yang menyentuh ujung wick C1 (= bottom gap untuk Long,
+       top gap untuk Short) — artinya gap sudah 100% terisi secara harga.
+    2. Setelah itu, harga jalan ke arah BOS sejauh >= C2_WICK_SKIP_R × SL_dist
+       (default 2R) TANPA sempat menyentuh entry C2 wick lebih dulu.
+    Kalau hanya kondisi 1 terpenuhi (gap terisi tapi harga balik ke C2 wick),
+    FVG masih valid — entry C2 wick tetap bisa dipakai."""
     c3i = gap.get('c3_idx')
-    c1c = float(gap.get('c1_close', 0))
-    if c3i is None or c1c <= 0:
+    if c3i is None:
         return True
-    n = len(df)
-    for k in range(int(c3i) + 1, n):   # candle setelah C3 s/d candle TERBARU (ikut yg belum close)
-        if stype == "Long" and float(df['low'].iloc[k]) <= c1c:
-            return False
-        if stype == "Short" and float(df['high'].iloc[k]) >= c1c:
-            return False
-    return True
+    # Threshold sentuhan: ujung wick C1 yang membentuk tepi gap
+    if stype == "Long":
+        c1_wick = float(gap.get('bottom', 0))      # high[C1] = bottom gap
+        c2_entry = float(gap.get('c2_low', 0))     # entry C2 wick untuk Long
+    else:
+        c1_wick = float(gap.get('top', 0))          # low[C1] = top gap
+        c2_entry = float(gap.get('c2_high', 0))    # entry C2 wick untuk Short
+    if c1_wick <= 0:
+        return True
+    # SL dist = SL_CAP_RANGE * bos_rng tidak tersedia di sini, pakai gap size sebagai proxy
+    # (gap size ~ jarak antara C1 wick dan C3, cukup proporsional dengan BOS range kecil)
+    # Idealnya sl_dist dikirim sebagai arg, tapi untuk menjaga signature lama, pakai fallback:
+    gap_size = abs(float(gap.get('top', 0)) - float(gap.get('bottom', 0)))
+    sl_proxy = gap.get('_sl_dist', gap_size)    # _sl_dist diinjek dari _get_fvgs kalau tersedia
+    skip_thresh = C2_WICK_SKIP_R * sl_proxy if sl_proxy > 0 else float('inf')
+    wick_touched = False
+    for k in range(int(c3i) + 1, len(df)):
+        lo = float(df['low'].iloc[k])
+        hi = float(df['high'].iloc[k])
+        if stype == "Long":
+            if not wick_touched:
+                # Cek sentuhan wick lebih dulu
+                if lo <= c1_wick:
+                    wick_touched = True
+                    # Dalam candle yang sama: setelah wick tersentuh, cek apakah harga
+                    # sudah lari ke atas 2R dari c1_wick
+                    if hi >= c1_wick + skip_thresh:
+                        return False  # wick tersentuh DAN lari 2R di candle sama -> hangus
+                else:
+                    # Wick belum tersentuh, tapi harga sudah lari jauh ke atas (entry terlewat)
+                    if hi >= c1_wick + skip_thresh:
+                        return False  # entry C2 wick terlewat -> hangus
+            else:
+                # C1 wick sudah tersentuh: cek apakah harga sempat turun ke C2 wick
+                if c2_entry > 0 and lo <= c2_entry:
+                    return True   # balik ke C2 wick -> masih valid
+                if hi >= c1_wick + skip_thresh:
+                    return False  # jalan duluan setelah wick -> hangus
+        else:
+            if not wick_touched:
+                if hi >= c1_wick:
+                    wick_touched = True
+                    if lo <= c1_wick - skip_thresh:
+                        return False
+                else:
+                    if lo <= c1_wick - skip_thresh:
+                        return False
+            else:
+                if c2_entry > 0 and hi >= c2_entry:
+                    return True
+                if lo <= c1_wick - skip_thresh:
+                    return False
+    return True   # belum ada kondisi hangus -> masih valid
 
 
 def c2_wick_still_valid(df, gap, stype, sl_dist):
@@ -1192,17 +1249,46 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             print(f"   {coin}: IDM {e_stype} skip -> funding window aktif, gak searah (rate={rate})")
             continue
 
-        if IDM_LIMIT_ENTRY:
-            # Filter momentum: leg impulsif (choch->puncak) WAJIB ada candle yg makan range candle
-            # lain (lihat momentum_eaten()) sblm dipercaya ada liquidity nyata di balik IDM ini.
+        if IDM_LIMIT_ENTRY or IDM_M5_ENGULF:
+            # Filter momentum
             if INDUCEMENT_MOMENTUM_FILTER:
                 eaten = momentum_eaten(df_h1, a['peak_idx'], stype)
                 if eaten is not True:
                     reason = "data kurang (<min candle sejak puncak)" if eaten is None else "tak ada candle makan candle"
-                    print(f"   {coin}: IDM {stype} skip limit -> momentum filter gagal ({reason})")
+                    print(f"   {coin}: IDM {stype} skip -> momentum filter gagal ({reason})")
                     continue
-            # ENTRY LIMIT di IDM_LIMIT_FIB (50%) range CANDLE H1 yg MEMBENTUK trigger IDM
-            # (candle di prot_idx — ujungnya = level trigger, biasanya di ujung IDM). BUKAN candle M5.
+
+            if IDM_M5_ENGULF:
+                # ── M5 ENGULF MODE: simpan state monitor, entry nanti saat engulfing dikonfirmasi ──
+                print(f"🎯 {coin}: IDM {stype} trigger={prot:.6g} tersapu → monitor M5 engulfing ({e_stype})")
+                idm_pending[_akey(coin, e_stype)] = {
+                    'coin': coin, 'side': side, 'e_stype': e_stype,
+                    'order_id': None,           # tidak ada limit order
+                    'entry': None, 'sl': None, 'placed_ts': time.time(),
+                    'trigger': prot, 'rng': rng, 'sl_dist': sl_dist,
+                    'swing_val': a['swing_val'], 'choch_level': a['choch_level'],
+                    'peak_val': a['peak_val'], 'bos_type': e_stype,
+                    # M5 monitor state
+                    'm5_triggered': False,
+                    'm5_focus_hi': 0.0, 'm5_focus_lo': 0.0, 'm5_focus_idx': 0,
+                    'm5_hangus': False,
+                }
+                inducement_done[coin] = sig
+                rec = (
+                    f"════ IDM M5 ENGULF MONITOR ════\n"
+                    f"  {coin} | menunggu engulfing {e_stype} M5 | trigger={prot:.6g}\n"
+                    f"  BOS BESAR ({stype}): break={a['swing_val']:.6g} choch={a['choch_level']:.6g} "
+                    f"puncak={a['peak_val'] if a['peak_val'] is not None else a['B']:.6g} range={rng:.6g}\n"
+                    f"  IDM trigger={prot:.6g}@{idm['prot_idx']} | batal jika >±{IDM_CANCEL_RANGE_PCT*100:.0f}% range"
+                )
+                log_entry(rec)
+                if (not ALLOW_HEDGE) and coin in pending:
+                    for d, st in list(pending[coin].items()):
+                        if st.get('order_id'): cancel_order(coin, st['order_id'])
+                    pending.pop(coin, None)
+                return True
+
+            # ── LIMIT MODE (IDM_M5_ENGULF=False, IDM_LIMIT_ENTRY=True) ──
             pidx = idm.get('prot_idx')
             if pidx is None or pidx < 0 or pidx >= len(df_struct):
                 continue
@@ -1211,10 +1297,10 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
             rng_c = hi_c - lo_c
             if rng_c <= 0:
                 continue
-            if e_stype == "Long":          # 0%=low,100%=high
+            if e_stype == "Long":
                 entry_p = lo_c + IDM_LIMIT_FIB * rng_c
                 sl_p = entry_p - sl_dist
-            else:                          # Short: 0%=high,100%=low
+            else:
                 entry_p = hi_c - IDM_LIMIT_FIB * rng_c
                 sl_p = entry_p + sl_dist
             print(f"🎯 {coin}: INDUCEMENT {stype} disentuh (level {prot:.6g}) → LIMIT {e_stype} @ "
@@ -1242,8 +1328,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 log_entry(rec)
                 if (not ALLOW_HEDGE) and coin in pending:
                     for d, st in list(pending[coin].items()):
-                        if st.get('order_id'):
-                            cancel_order(coin, st['order_id'])
+                        if st.get('order_id'): cancel_order(coin, st['order_id'])
                     pending.pop(coin, None)
                 return True
             continue
@@ -1953,6 +2038,9 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
         'c2_wick_entry': (c2_l if stype == 'Long' else c2_h) if ENTRY_C2_WICK else None,
         'c1c_touched': False,   # True = C1.close pernah tersentuh
         'c1c_run_r':   0.0,     # max R yg dicapai dari C1.close ke arah BOS setelah C1 tersentuh
+        # M5 engulfing monitor state (hanya mode C1 close)
+        'm5_c1c_touched': False,
+        'm5_focus_hi': 0.0, 'm5_focus_lo': 0.0, 'm5_focus_idx': 0,
     }
     return setup, logline
 
@@ -1967,7 +2055,81 @@ def _count_slots():
     return nf
 
 
-def process_setup(coin, setup, df_h1_live, curr_h1):
+def check_m5_engulfing(coin, setup, df_m5, bos_rng):
+    """Monitor M5 setelah C1 close H1 tersentuh. Cari konfirmasi engulfing untuk market order.
+    Return: dict {'entry': float, 'sl': float, 'side': str} jika engulfing terkonfirmasi,
+            None jika belum ada konfirmasi.
+    State disimpan di setup dict:
+      'm5_c1c_touched' : bool  — apakah C1 close H1 sudah tersentuh di M5
+      'm5_focus_hi'    : float — high candle fokus aktif
+      'm5_focus_lo'    : float — low candle fokus aktif
+      'm5_focus_idx'   : int   — index candle fokus di df_m5
+    """
+    if df_m5 is None or len(df_m5) < 2:
+        return None
+    stype   = setup['type']
+    c1c     = float(setup.get('orig_ocl', 0))   # C1 close H1 = threshold sentuhan
+    if c1c <= 0:
+        return None
+
+    # ── Init: cari candle M5 PALING AWAL yang menyentuh C1 close (scan maju) ──
+    # Scan semua candle kecuali yg berjalan (iloc[-1])
+    n = len(df_m5)
+    closed_end = n - 1   # index eksklusif: loop sampai < closed_end (tidak termasuk candle berjalan)
+    if not setup.get('m5_c1c_touched'):
+        for i in range(closed_end):
+            lo = float(df_m5['low'].iloc[i])
+            hi = float(df_m5['high'].iloc[i])
+            touched = (stype == 'Long' and lo <= c1c) or (stype == 'Short' and hi >= c1c)
+            if touched:
+                setup['m5_c1c_touched'] = True
+                setup['m5_focus_hi']    = hi
+                setup['m5_focus_lo']    = lo
+                setup['m5_focus_idx']   = i
+                print(f"   {coin} {stype}: C1 close ({c1c:.6g}) tersentuh M5 idx={i} "
+                      f"hi={hi:.6g} lo={lo:.6g} — mulai monitor engulfing")
+                break
+        if not setup.get('m5_c1c_touched'):
+            return None   # belum tersentuh
+
+    # ── Scan candle setelah fokus s/d candle closed terbaru (tidak termasuk candle berjalan) ──
+    focus_idx = setup.get('m5_focus_idx', 0)
+    focus_hi  = float(setup['m5_focus_hi'])
+    focus_lo  = float(setup['m5_focus_lo'])
+
+    for i in range(focus_idx + 1, closed_end):
+        lo = float(df_m5['low'].iloc[i])
+        hi = float(df_m5['high'].iloc[i])
+        cl = float(df_m5['close'].iloc[i])
+
+        # ── Cek engulfing DULU sebelum update fokus ──
+        if stype == 'Long' and cl > focus_hi:
+            sl_price = lo - SL_ENGULF_PCT * bos_rng
+            print(f"   {coin} {stype}: ENGULFING M5 idx={i} close={cl:.6g} > focus_hi={focus_hi:.6g} "
+                  f"→ entry={cl:.6g} SL={sl_price:.6g}")
+            setup['m5_focus_idx'] = i   # update agar tidak re-trigger loop berikutnya
+            return {'entry': cl, 'sl': sl_price, 'side': 'Buy', 'engulf_idx': i}
+        if stype == 'Short' and cl < focus_lo:
+            sl_price = hi + SL_ENGULF_PCT * bos_rng
+            print(f"   {coin} {stype}: ENGULFING M5 idx={i} close={cl:.6g} < focus_lo={focus_lo:.6g} "
+                  f"→ entry={cl:.6g} SL={sl_price:.6g}")
+            setup['m5_focus_idx'] = i
+            return {'entry': cl, 'sl': sl_price, 'side': 'Sell', 'engulf_idx': i}
+
+        # ── Update fokus jika wick atau close keluar range fokus ──
+        wick_out       = (hi > focus_hi) or (lo < focus_lo)
+        close_break_dn = (stype == 'Long'  and cl < focus_lo)
+        close_break_up = (stype == 'Short' and cl > focus_hi)
+        if wick_out or close_break_dn or close_break_up:
+            focus_hi = hi; focus_lo = lo
+            setup['m5_focus_hi']  = hi; setup['m5_focus_lo']  = lo
+            setup['m5_focus_idx'] = i
+            print(f"   {coin} {stype}: fokus pindah ke M5 idx={i} hi={hi:.6g} lo={lo:.6g}")
+
+    return None   # belum ada engulfing
+
+
+def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
     """Proses 1 setup (1 arah). Mutasi setup in-place.
     Return: 'remove' | 'keep' (WAIT_APPROACH) | 'lock' (WAIT_FILL) | 'fill' (posisi sudah dibuka)."""
     stype = setup['type']; choch_level = setup.get('choch_level'); bos_idx = setup.get('bos_idx', 0)
@@ -2041,34 +2203,98 @@ def process_setup(coin, setup, df_h1_live, curr_h1):
 
     # ── WAIT_APPROACH ──
     if setup['phase'] == 'WAIT_APPROACH':
-        entry = setup['entry']; dist = setup['dist']; thr = APPROACH_R * dist
-        approaching   = (stype == 'Long'  and curr_price <= entry + thr) or \
-                        (stype == 'Short' and curr_price >= entry - thr)
-        approach_thr  = entry + thr if stype == 'Long' else entry - thr
-        r_now = ((curr_price - entry) if stype == 'Long' else (entry - curr_price)) / dist if dist > 0 else 0
-        to_arm = r_now - APPROACH_R   # berapa R lagi sampai limit dipasang
+        entry = setup['entry']; dist = setup['dist']
+        side_order = "Buy" if stype == "Long" else "Sell"
+
+        # ── PATH A: C1 close mode + M5_ENGULF_FILTER ──
+        # Monitor dimulai begitu C1 close tersentuh di M5. Tidak pakai APPROACH_R.
+        # Batal hanya jika CHOCH ditembus (ditangani di atas oleh choch_is_broken).
+        if not ENTRY_C2_WICK and M5_ENGULF_FILTER and df_m5 is not None:
+            c1c     = float(setup.get('orig_ocl', entry))
+            bos_rng = abs(float(setup.get('peak_val') or 0) - float(setup.get('choch_level') or 0))
+            if setup.get('m5_c1c_touched'):
+                print(f"\U0001f441\ufe0f  {coin} {stype} | now:{curr_price:.6f} C1.close:{c1c:.6f} | monitor engulfing M5...")
+            else:
+                print(f"\U0001f441\ufe0f  {coin} {stype} | now:{curr_price:.6f} C1.close:{c1c:.6f} | "
+                      f"menunggu sentuhan C1.close (jarak {abs(curr_price-c1c):.6f})")
+            active_count = len(active_positions) + _count_slots()
+            if active_count >= MAX_CONCURRENT:
+                print(f"\u23f8\ufe0f  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
+                return 'keep'
+            engulf = check_m5_engulfing(coin, setup, df_m5, bos_rng)
+            if engulf:
+                oid, qty = place_market_entry(coin, engulf['side'], engulf['entry'], engulf['sl'], None)
+                if oid:
+                    actual_entry = engulf['entry']
+                    sl_p         = engulf['sl']
+                    actual_dist  = abs(actual_entry - sl_p)
+                    min_dist     = actual_entry * 0.002
+                    if actual_dist < min_dist:
+                        actual_dist = min_dist
+                        sl_p = actual_entry - actual_dist if side_order == "Buy" else actual_entry + actual_dist
+                    trail_d  = TRAIL_STOP * actual_dist
+                    info     = get_instrument_info(coin); tick = info.get('tick_size', 0.0001)
+                    sl_r     = round_price(sl_p, tick); trail_r = round_price(trail_d, tick)
+                    active_p = round_price(
+                        actual_entry + TRAIL_ACT_R * actual_dist if side_order == "Buy"
+                        else actual_entry - TRAIL_ACT_R * actual_dist, tick)
+                    for _attempt in range(3):
+                        try:
+                            if USE_TP:
+                                tp_r = round_price(actual_entry + RR_TP * actual_dist if side_order == "Buy"
+                                                   else actual_entry - RR_TP * actual_dist, tick)
+                                res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin,
+                                    stopLoss=str(sl_r), takeProfit=str(tp_r), positionIdx=_pidx(side_order))
+                            else:
+                                res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin,
+                                    stopLoss=str(sl_r), trailingStop=str(trail_r),
+                                    activePrice=str(active_p), positionIdx=_pidx(side_order))
+                            if res_ts.get('retCode', -1) == 0:
+                                print(f"\U0001f6e1\ufe0f  {coin}: SL={sl_r} " + (f"TP={tp_r}" if USE_TP else f"Trail={trail_r} act={active_p}"))
+                                break
+                            else:
+                                print(f"\u26a0\ufe0f {coin}: set_trading_stop gagal: {res_ts.get('retMsg','')}"); time.sleep(2)
+                        except Exception as e2:
+                            print(f"\u26a0\ufe0f {coin}: set_trading_stop error: {e2}"); time.sleep(2)
+                    active_positions[_akey(coin, stype)] = {
+                        'coin': coin, 'side': side_order, 'entry': actual_entry,
+                        'sl': sl_p, 'dist': actual_dist, 'trail_dist': trail_d,
+                        'trail_engaged': False, 'trail_set': True,
+                        'last_price': actual_entry, 'entry_time': time.time(),
+                        'peak': actual_entry, 'peak_time': time.time(),
+                        'swing_val': setup.get('swing_val'), 'bos_type': stype, 'rev_count': 0,
+                        'orig_ocl': setup.get('orig_ocl', entry),
+                        'choch_level': setup.get('choch_level'), 'peak_val': setup.get('peak_val'),
+                        'swing2': setup.get('swing2'),
+                    }
+                    done_setups[coin] = {'swing_val': setup.get('swing_val'), 'stype': stype, 'used_ocl': entry}
+                    print(f"\u2705 {coin} {stype}: ENGULFING M5 entry! Entry:{actual_entry:.6f} SL:{sl_p:.6f} | "
+                          f"break:{setup.get('swing_val'):.6g} puncak:{setup.get('peak_val'):.6g}")
+                    return 'fill'
+            return 'keep'
+
+        # ── PATH B: Limit biasa (C2 wick atau M5_ENGULF_FILTER=False) ──
+        thr = APPROACH_R * dist
+        approaching = (stype == 'Long'  and curr_price <= entry + thr) or                       (stype == 'Short' and curr_price >= entry - thr)
+        r_now  = ((curr_price - entry) if stype == 'Long' else (entry - curr_price)) / dist if dist > 0 else 0
+        to_arm = r_now - APPROACH_R
+        r_info = (f"{r_now:.2f}R dari entry" if approaching else
+                  f"{r_now:.2f}R dari entry (pasang di {APPROACH_R:.1f}R, kurang {to_arm:.2f}R lagi)")
+        print(f"\U0001f441\ufe0f  {coin} {stype} | now:{curr_price:.6f} entry:{entry:.6f} | {r_info} | "
+              f"{'\u2705 DALAM RANGE' if approaching else '\u23f3 menunggu'}")
         if approaching:
-            status_str = "✅ DALAM RANGE — pasang limit"
-            r_info = f"{r_now:.2f}R dari entry"
-        else:
-            status_str = "⏳ menunggu"
-            r_info = f"{r_now:.2f}R dari entry (pasang di {APPROACH_R:.1f}R, kurang {to_arm:.2f}R lagi)"
-        print(f"👁️  {coin} {stype} | now:{curr_price:.6f} entry:{entry:.6f} | {r_info} | {status_str}")
-        if approaching:
-            direction_valid = (stype == 'Long'  and curr_price > entry) or \
-                              (stype == 'Short' and curr_price < entry)
+            direction_valid = (stype == 'Long' and curr_price > entry) or                               (stype == 'Short' and curr_price < entry)
             if not direction_valid:
-                print(f"⛔ {coin} {stype}: harga {curr_price:.6f} sudah lewat zona {entry:.6f} — batal.")
+                print(f"\u26d4 {coin} {stype}: harga {curr_price:.6f} sudah lewat zona {entry:.6f} \u2014 batal.")
                 return 'remove'
             active_count = len(active_positions) + _count_slots()
             if active_count >= MAX_CONCURRENT:
-                print(f"⏸️  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
+                print(f"\u23f8\ufe0f  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
                 return 'keep'
-            side_order = "Buy" if stype == "Long" else "Sell"
-            order_id   = place_limit_order(coin, side_order, entry, setup['sl'])
+            order_id = place_limit_order(coin, side_order, entry, setup['sl'])
             if order_id:
                 setup['phase'] = 'WAIT_FILL'; setup['order_id'] = order_id
-                print(f"📍 {coin} {stype}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R) | "
+                print(f"\U0001f4cd {coin} {stype}: Limit dipasang @ {entry:.6f} (dalam {APPROACH_R}R) | "
                       f"break:{setup.get('swing_val'):.6g} puncak:{setup.get('peak_val'):.6g} CHOCH:{setup.get('choch_level'):.6g}")
                 return 'lock'
             return 'remove'
@@ -2196,10 +2422,99 @@ def check_idm_pending():
             log_entry(f"════ FILL INDUCEMENT {p['e_stype']} {coin} @ {entry:.6g} (limit {IDM_LIMIT_FIB*100:.0f}% candle H1) ════")
             del idm_pending[key]
             continue
-        # INVALIDASI PERGERAKAN: batal jika harga sudah bergerak > IDM_CANCEL_MOVE_PCT×range
-        # dari trigger ke arah kelanjutan (Short: turun di bawah trig; Long: naik di atas trig).
         trig = p.get('trigger'); rng = p.get('rng')
-        if trig is not None and rng:
+
+        # ── IDM M5 ENGULF MODE ──
+        if IDM_M5_ENGULF and p.get('order_id') is None and not p.get('m5_hangus'):
+            df_m5_idm = get_data(coin, "5", limit=100)
+            if df_m5_idm is None:
+                continue
+            e_stype_idm = p['e_stype']
+            bos_rng_idm = rng or 1.0
+
+            # Cek hangus permanen: harga keluar ±20% range BOS dari trigger
+            if trig and rng:
+                cancel_thr_up   = trig + IDM_CANCEL_RANGE_PCT * rng
+                cancel_thr_down = trig - IDM_CANCEL_RANGE_PCT * rng
+                hi_max = float(df_m5_idm['high'].max())
+                lo_min = float(df_m5_idm['low'].min())
+                if hi_max > cancel_thr_up or lo_min < cancel_thr_down:
+                    print(f"🚫 {coin}: IDM {e_stype_idm} HANGUS PERMANEN — harga keluar "
+                          f"±{IDM_CANCEL_RANGE_PCT*100:.0f}% dari trigger {trig:.6g} "
+                          f"(hi={hi_max:.6g} lo={lo_min:.6g} batas={cancel_thr_down:.6g}-{cancel_thr_up:.6g})")
+                    del idm_pending[key]
+                    continue
+
+            # Setup sementara untuk check_m5_engulfing
+            # IDM Short (BOS Long): fokus candle yang menyentuh trigger (low candle = trigger level)
+            # Engulfing = close < low candle fokus → konfirmasi tekanan jual
+            m5_setup = {
+                'type': e_stype_idm,
+                'orig_ocl': trig,   # gunakan trigger sebagai "C1 close" untuk deteksi sentuhan
+                'm5_c1c_touched': p.get('m5_triggered', False),
+                'm5_focus_hi': p.get('m5_focus_hi', 0.0),
+                'm5_focus_lo': p.get('m5_focus_lo', 0.0),
+                'm5_focus_idx': p.get('m5_focus_idx', 0),
+                'peak_val': trig + bos_rng_idm,
+                'choch_level': trig - bos_rng_idm,
+            }
+            engulf = check_m5_engulfing(coin, m5_setup, df_m5_idm, bos_rng_idm)
+            # Simpan state kembali ke idm_pending
+            p['m5_triggered']  = m5_setup['m5_c1c_touched']
+            p['m5_focus_hi']   = m5_setup['m5_focus_hi']
+            p['m5_focus_lo']   = m5_setup['m5_focus_lo']
+            p['m5_focus_idx']  = m5_setup['m5_focus_idx']
+            if engulf:
+                actual_entry = engulf['entry']
+                sl_p         = engulf['sl']
+                actual_dist  = abs(actual_entry - sl_p)
+                min_dist     = actual_entry * 0.002
+                if actual_dist < min_dist:
+                    actual_dist = min_dist
+                    sl_p = actual_entry - actual_dist if p['side'] == "Buy" else actual_entry + actual_dist
+                trail_d  = TRAIL_STOP * actual_dist
+                info     = get_instrument_info(coin); tick = info.get('tick_size', 0.0001)
+                sl_r     = round_price(sl_p, tick); trail_r = round_price(trail_d, tick)
+                active_p = round_price(
+                    actual_entry + TRAIL_ACT_R * actual_dist if p['side'] == "Buy"
+                    else actual_entry - TRAIL_ACT_R * actual_dist, tick)
+                oid, qty = place_market_entry(coin, p['side'], actual_entry, sl_p, None)
+                if oid:
+                    for _attempt in range(3):
+                        try:
+                            if USE_TP:
+                                tp_r = round_price(actual_entry + RR_TP * actual_dist if p['side'] == "Buy"
+                                                   else actual_entry - RR_TP * actual_dist, tick)
+                                res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin,
+                                    stopLoss=str(sl_r), takeProfit=str(tp_r), positionIdx=_pidx(p['side']))
+                            else:
+                                res_ts = session.set_trading_stop(category=CATEGORY, symbol=coin,
+                                    stopLoss=str(sl_r), trailingStop=str(trail_r),
+                                    activePrice=str(active_p), positionIdx=_pidx(p['side']))
+                            if res_ts.get('retCode', -1) == 0:
+                                print(f"🛡️  {coin}: SL={sl_r} " + (f"TP={tp_r}" if USE_TP else f"Trail={trail_r} act={active_p}"))
+                                break
+                            else:
+                                print(f"⚠️ {coin} IDM: set_trading_stop gagal: {res_ts.get('retMsg','')}"); time.sleep(2)
+                        except Exception as e:
+                            print(f"⚠️ {coin} IDM: set_trading_stop error: {e}"); time.sleep(2)
+                    active_positions[_akey(coin, e_stype_idm)] = {
+                        'coin': coin, 'side': p['side'], 'entry': actual_entry,
+                        'sl': sl_p, 'dist': actual_dist, 'trail_dist': trail_d,
+                        'trail_engaged': False, 'trail_set': True,
+                        'last_price': actual_entry, 'entry_time': time.time(),
+                        'peak': actual_entry, 'peak_time': time.time(),
+                        'swing_val': p['swing_val'], 'bos_type': e_stype_idm, 'rev_count': 0,
+                        'orig_ocl': actual_entry, 'choch_level': p['choch_level'],
+                        'peak_val': p['peak_val'], 'swing2': p['peak_val'], 'kind': 'inducement',
+                    }
+                    print(f"✅ {coin}: IDM M5 ENGULF {e_stype_idm} entry! @ {actual_entry:.6g} SL:{sl_p:.6g}")
+                    log_entry(f"════ FILL IDM M5 ENGULF {e_stype_idm} {coin} @ {actual_entry:.6g} ════")
+                    del idm_pending[key]
+            continue   # M5 engulf path selesai, lanjut ke key berikutnya
+
+        # ── INVALIDASI PERGERAKAN (mode limit lama) ──
+        if trig is not None and rng and not IDM_M5_ENGULF:
             thr = trig - IDM_CANCEL_MOVE_PCT * rng if p['e_stype'] == "Short" else trig + IDM_CANCEL_MOVE_PCT * rng
             df_m5 = get_data(coin, "5", limit=30)
             if df_m5 is not None and len(df_m5) > 0:
@@ -2300,6 +2615,9 @@ def run_bot():
                 sh_h1, sl_h1 = find_last_swing_bos(df_h1_live)
                 closed_h1 = df_h1_live.iloc[-2]
                 curr_h1   = df_h1_live.iloc[-1]
+                # Fetch M5 hanya jika ada setup C1 close yang sedang monitor engulfing
+                _need_m5 = (not ENTRY_C2_WICK) and M5_ENGULF_FILTER and coin in pending
+                df_m5_live = get_data(coin, "5", limit=300) if _need_m5 else None
 
                 # ── INDUCEMENT ENTRY (market, kebalik arah; berdampingan dgn limit FVG) ──
                 if INDUCEMENT_ENTRY and check_inducement_entry(coin, df_h1_live, sh_h1, sl_h1):
@@ -2310,7 +2628,7 @@ def run_bot():
                     dirs = pending[coin]
                     filled = False
                     for d in list(dirs.keys()):
-                        action = process_setup(coin, dirs[d], df_h1_live, curr_h1)
+                        action = process_setup(coin, dirs[d], df_h1_live, curr_h1, df_m5=df_m5_live)
                         if action == 'remove':
                             if dirs[d].get('order_id'):
                                 cancel_order(coin, dirs[d]['order_id'])
