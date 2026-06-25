@@ -307,6 +307,7 @@ SESSION_FILTER: dict = {
 }
 
 
+bot_start_ts     = 0     # di-set saat run_bot() mulai — untuk filter sweep historis IDM
 pending          = {}
 idm_pending      = {}   # _akey(coin,e_stype) -> limit IDM yg menunggu fill (Fib retrace candle M5)
 active_positions = {}
@@ -1190,8 +1191,13 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         last_closed_idx = df_m5.index[-2]
         if len(breaches) == 0:
             continue                       # IDM belum disapu di M5 -> monitor
-        if breaches[0] != last_closed_idx:
-            continue                       # sudah disapu sebelumnya -> jangan entry (anti-spam redeploy)
+        # Sweep harus terjadi SETELAH bot mulai jalan (anti-spam redeploy).
+        # Berbeda dari logika lama (harus tepat di last_closed_idx) — sekarang pakai timestamp
+        # karena M5 engulf mode tidak langsung entry saat sweep, jadi sweep boleh terjadi
+        # di candle mana saja selama setelah bot_start_ts.
+        breach_ts_ms = df_m5['ts'].iloc[breaches[0]] if 'ts' in df_m5.columns else 0
+        if breach_ts_ms > 0 and breach_ts_ms < bot_start_ts * 1000:
+            continue                       # sweep terjadi sebelum bot jalan -> skip
         sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
         if inducement_done.get(coin) == sig:
             continue                       # struktur ini sudah pernah di-entry -> jangan ulang
@@ -2452,6 +2458,8 @@ def check_idm_pending():
 
 
 def run_bot():
+    global bot_start_ts
+    bot_start_ts = time.time()   # timestamp saat bot mulai jalan
     print("SMC INTI BOT — BOS H1 -> FVG -> Limit @ C1.close -> TP 1:2")
     print(f"CONFIG v9.22 | swing {SWING_BARS}-{SWING_BARS}/sub {SUBLEG_BARS}-{SUBLEG_BARS} | FVG biasa (warna bebas) | "
           f"zona C1 {ENTRY_ZONE_LO*100:.1f}%-{ENTRY_ZONE_HI*100:.0f}%{'(dinamis)' if ZONE_FROM_RETRACE else ''} | "
