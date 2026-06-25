@@ -160,7 +160,7 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
 TRAIL_STOP       = 1.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
-TRAIL_ACT_R      = 2.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
+TRAIL_ACT_R      = 3.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
@@ -2143,7 +2143,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
 
     # ── Cek FVG setup hangus: harga lari >= 20% BOS range dari C3 ujung ke arah BOS ──
     if setup.get('phase') == 'WAIT_APPROACH' and setup.get('bos_rng', 0) > 0:
-        c1c_trig     = float(setup.get('orig_ocl', 0))
+        c3_trig      = float(setup.get('orig_ocl', 0))
         cancel_dist  = FVG_CANCEL_RANGE_PCT * float(setup['bos_rng'])
         if c3_trig > 0 and cancel_dist > 0:
             hi_now = float(curr_h1.get('high', curr_price))
@@ -2152,7 +2152,7 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
             if hangus:
                 print(f"🚫 {coin} {stype}: FVG hangus — harga lari "
                       f">={FVG_CANCEL_RANGE_PCT*100:.0f}% range BOS dari C1 close "
-                      f"({c1c_trig:.6g}) ke arah BOS tanpa engulfing.")
+                      f"({c3_trig:.6g}) ke arah BOS tanpa engulfing.")
                 return 'remove'
 
     # ── WAIT_APPROACH ──
@@ -2166,9 +2166,9 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
             c3_trig = float(setup.get('orig_ocl', entry))
             bos_rng = float(setup.get('bos_rng') or abs(float(setup.get('peak_val') or 0) - float(setup.get('choch_level') or 0)))
             if setup.get('m5_c1c_touched'):
-                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C3.ujung:{c3_trig:.6f} | monitor engulfing M5...")
+                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C1.close:{c3_trig:.6f} | monitor engulfing M5...")
             else:
-                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C3.ujung:{c3_trig:.6f} | "
+                print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C1.close:{c3_trig:.6f} | "
                       f"menunggu sentuhan (jarak {abs(curr_price-c3_trig):.6f})")
             active_count = len(active_positions) + _count_slots()
             if active_count >= MAX_CONCURRENT:
