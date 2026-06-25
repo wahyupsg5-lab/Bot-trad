@@ -165,7 +165,7 @@ TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari 
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
 RISK_PCT         = 0.01   # risk per trade = 1% dari total equity
-LEVERAGE         = 20     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
+LEVERAGE         = 25     # leverage (dibatasi max_leverage coin). Naikkan utk hemat margin (slot lebih banyak)
 MIN_ORDER_USD    = 5.0    # minimum order value Bybit
 ORDER_BUMP_FLOOR = 4.0    # order >= ini & < $5 -> naikkan qty ke $5 (over-risk <=1.25x); di bawah ini skip
 SBR_MODE         = True   # True = SBR entry di C1.close + SL di C1.low, False = OCL entry lama
@@ -2168,8 +2168,9 @@ def process_setup(coin, setup, df_h1_live, curr_h1, df_m5=None):
             if setup.get('m5_c1c_touched'):
                 print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C1.close:{c3_trig:.6f} | monitor engulfing M5...")
             else:
+                _pct_fvg = abs(curr_price - c3_trig) / c3_trig * 100 if c3_trig else 0
                 print(f"👁️  {coin} {stype} | now:{curr_price:.6f} C1.close:{c3_trig:.6f} | "
-                      f"menunggu sentuhan (jarak {abs(curr_price-c3_trig):.6f})")
+                      f"menunggu sentuhan ({_pct_fvg:.2f}% lagi)")
             active_count = len(active_positions) + _count_slots()
             if active_count >= MAX_CONCURRENT:
                 print(f"\u23f8\ufe0f  {coin}: slot penuh ({active_count}/{MAX_CONCURRENT})")
@@ -2375,6 +2376,15 @@ def check_idm_pending():
                 continue
             e_stype_idm = p['e_stype']
             bos_rng_idm = rng or 1.0
+            # Log status IDM trigger
+            if trig:
+                _curr_idm = float(df_m5_idm.iloc[-1]['close']) if len(df_m5_idm) > 0 else 0
+                _pct_idm  = abs(_curr_idm - trig) / trig * 100 if trig and _curr_idm else 0
+                if p.get('m5_triggered'):
+                    print(f"👁️  IDM {coin} [{e_stype_idm}] | now:{_curr_idm:.6g} trigger:{trig:.6g} | monitor engulfing M5...")
+                else:
+                    print(f"👁️  IDM {coin} [{e_stype_idm}] | now:{_curr_idm:.6g} trigger:{trig:.6g} | "
+                          f"menunggu sweep ({_pct_idm:.2f}% lagi)")
 
             # Cek hangus permanen: harga keluar ±20% range BOS dari trigger
             if trig and rng:
@@ -2401,6 +2411,7 @@ def check_idm_pending():
                 'm5_focus_idx': p.get('m5_focus_idx', 0),
                 'peak_val': trig + bos_rng_idm,
                 'choch_level': trig - bos_rng_idm,
+                'created_ts': p.get('placed_ts', 0),   # filter candle historis
             }
             engulf = check_m5_engulfing(coin, m5_setup, df_m5_idm, bos_rng_idm)
             # Simpan state kembali ke idm_pending
@@ -2509,6 +2520,14 @@ def run_bot():
                     bk = f"{bk:.6g}" if bk else "—"; pk = f"{pk:.6g}" if pk else "—"; ch = f"{ch:.6g}" if ch else "—"
                     print(f"   {c} [{d}]: {st.get('phase','?')} @ {st.get('entry',0):.6g} | "
                           f"break:{bk} puncak:{pk} CHOCH:{ch}")
+        if idm_pending:
+            for k, p in idm_pending.items():
+                trig_p = p.get('trigger', 0); e_st = p.get('e_stype','?')
+                bk = p.get('swing_val'); pk = p.get('peak_val'); ch = p.get('choch_level')
+                bk = f"{bk:.6g}" if bk else "—"; pk = f"{pk:.6g}" if pk else "—"; ch = f"{ch:.6g}" if ch else "—"
+                phase_lbl = "WAIT_FILL" if p.get('order_id') else "WAIT_TRIGGER"
+                print(f"   IDM {p.get('coin','?')} [{e_st}]: {phase_lbl} trigger={trig_p:.6g} | "
+                      f"break:{bk} puncak:{pk} CHOCH:{ch}")
         print(f"{'='*55}")
 
         for coin in SYMBOLS:
