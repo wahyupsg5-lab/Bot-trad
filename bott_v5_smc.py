@@ -159,7 +159,7 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
-TRAIL_STOP       = 2.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
+TRAIL_STOP       = 1.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
 TRAIL_ACT_R      = 4.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
@@ -1195,7 +1195,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         # Filter historis ditangani oleh created_ts di check_m5_engulfing (placed_ts = time.time()),
         # sehingga engulfing dari candle sebelum bot jalan tidak akan di-trigger.
         sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
-        if inducement_done.get(coin) == sig:
+        if inducement_done.get((coin, stype)) == sig:
             continue                       # struktur ini sudah pernah di-entry -> jangan ulang
         if stype == "Long":
             side, e_stype = "Sell", "Short"
@@ -1237,7 +1237,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                     'm5_focus_hi': 0.0, 'm5_focus_lo': 0.0, 'm5_focus_idx': 0,
                     'm5_hangus': False,
                 }
-                inducement_done[coin] = sig
+                inducement_done[(coin, stype)] = sig
                 rec = (
                     f"════ IDM M5 ENGULF MONITOR ════\n"
                     f"  {coin} | menunggu engulfing {e_stype} M5 | trigger={prot:.6g}\n"
@@ -1278,7 +1278,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                     'swing_val': a['swing_val'], 'choch_level': a['choch_level'],
                     'peak_val': a['peak_val'], 'bos_type': e_stype,
                 }
-                inducement_done[coin] = sig
+                inducement_done[(coin, stype)] = sig
                 rec = (
                     f"════ LIMIT INDUCEMENT ({IDM_LIMIT_FIB*100:.0f}% range candle H1 IDM) ════\n"
                     f"  {coin} | LIMIT {e_stype} @ {entry_p:.6g} | SL {sl_p:.6g}\n"
@@ -1318,7 +1318,7 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
                 'orig_ocl': curr, 'choch_level': a['choch_level'], 'peak_val': a['peak_val'],
                 'swing2': a['peak_val'], 'kind': 'inducement',
             }
-            inducement_done[coin] = sig   # tandai struktur ini sudah di-entry (anti entry-ulang)
+            inducement_done[(coin, stype)] = sig   # tandai struktur ini sudah di-entry (anti entry-ulang)
             rec = (
                 f"════ ENTRY INDUCEMENT ════\n"
                 f"  {coin} | entry {e_stype} MARKET @ ~{curr:.6g} qty {qty}\n"
@@ -2398,6 +2398,11 @@ def check_idm_pending():
                     print(f"🚫 {coin}: IDM {e_stype_idm} HANGUS PERMANEN — harga keluar "
                           f"±{IDM_CANCEL_RANGE_PCT*100:.0f}% dari trigger {trig:.6g} "
                           f"(hi={hi_max:.6g} lo={lo_min:.6g} batas={cancel_thr_down:.6g}-{cancel_thr_up:.6g})")
+                    # Tandai inducement_done supaya IDM ini tidak masuk lagi di loop berikutnya
+                    # key pakai BOS besar (stype = kebalikan e_stype_idm)
+                    _bos_stype_h = "Short" if e_stype_idm == "Long" else "Long"
+                    _sig_hangus = (p.get('swing_val'), p.get('choch_level'), e_stype_idm)
+                    inducement_done[(coin, _bos_stype_h)] = _sig_hangus
                     del idm_pending[key]
                     continue
 
