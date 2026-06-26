@@ -506,7 +506,7 @@ ENTRY_ZONE_HI = 1.00
 # Zona golden ratio dihitung dari C3 ujung, bukan C1 close.
 FVG_CANCEL_RANGE_PCT = 0.20   # 20% BOS range dari C3 ujung ke arah BOS → setup hangus
 
-# --- Filter engulfing M5 sebelum entry FVG (C3 ujung sebagai trigger) ---
+# --- Filter engulfing M5 sebelum entry FVG (C1 close sebagai trigger) ---
 # Saat C1 close H1 tersentuh, bot monitor M5 dan tunggu konfirmasi engulfing sebelum market order.
 # "Candle fokus" = candle M5 pertama yang menyentuh C1 close, lalu bergeser jika ada wick/close
 # yang keluar dari range candle fokus. Entry terjadi saat close candle M5 melewati high candle fokus
@@ -768,8 +768,8 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
             gaps = [g for g in gaps if g['bottom'] >= choch_level]
         else:
             gaps = [g for g in gaps if g['top'] <= choch_level]
-    # Filter ZONA ENTRY: C3 ujung harus di retrace z_lo..HI dari range BOS.
-    # Long: C3 ujung = top gap (low[C3]). Short: C3 ujung = bottom gap (high[C3]).
+    # Filter ZONA ENTRY: C1 close harus di retrace z_lo..HI dari range BOS.
+    # C1 close = titik golden ratio filter sekaligus trigger entry.
     if choch_level and len(df_h1) > bos_idx:
         if stype == "Long":
             B = float(df_h1['high'].iloc[bos_idx:].max())
@@ -778,7 +778,7 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
             if rng > 0:
                 lo = B - ENTRY_ZONE_HI * rng   # batas terdalam (CHOCH)
                 hi = B - z_lo * rng            # batas terdangkal
-                gaps = [g for g in gaps if lo <= g['top'] <= hi]
+                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
         else:
             B = float(df_h1['low'].iloc[bos_idx:].min())
             L = float(choch_level)
@@ -786,7 +786,7 @@ def _get_fvgs(df_h1, stype, bos_idx, choch_level=None, zone_lo=None, require_fre
             if rng > 0:
                 lo = B + z_lo * rng            # batas terdangkal
                 hi = B + ENTRY_ZONE_HI * rng   # batas terdalam (CHOCH)
-                gaps = [g for g in gaps if lo <= g['bottom'] <= hi]
+                gaps = [g for g in gaps if lo <= g.get('c1_close', 0) <= hi]
     # MAX_GAP_PCT: gap tidak boleh terlalu besar
     result = []
     for g in gaps:
@@ -1191,13 +1191,9 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         last_closed_idx = df_m5.index[-2]
         if len(breaches) == 0:
             continue                       # IDM belum disapu di M5 -> monitor
-        # Sweep harus terjadi SETELAH bot mulai jalan (anti-spam redeploy).
-        # Berbeda dari logika lama (harus tepat di last_closed_idx) — sekarang pakai timestamp
-        # karena M5 engulf mode tidak langsung entry saat sweep, jadi sweep boleh terjadi
-        # di candle mana saja selama setelah bot_start_ts.
-        breach_ts_ms = df_m5['ts'].iloc[breaches[0]] if 'ts' in df_m5.columns else 0
-        if breach_ts_ms > 0 and breach_ts_ms < bot_start_ts * 1000:
-            continue                       # sweep terjadi sebelum bot jalan -> skip
+        # Sweep sudah terjadi — masuk idm_pending untuk monitor engulfing M5.
+        # Filter historis ditangani oleh created_ts di check_m5_engulfing (placed_ts = time.time()),
+        # sehingga engulfing dari candle sebelum bot jalan tidak akan di-trigger.
         sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
         if inducement_done.get(coin) == sig:
             continue                       # struktur ini sudah pernah di-entry -> jangan ulang
@@ -1955,10 +1951,10 @@ def build_setup_from_bos(coin, df_h1_live, sh_h1, sl_h1, closed_h1, verbose=True
     gap_s = float(g0['top']) - float(g0['bottom'])
     # Trigger entry = ujung C3 (batas gap: top untuk Long, bottom untuk Short)
     if stype == 'Long':
-        entry_adj = float(g0['top'])      # low[C3]
+        entry_adj = c1_c                  # C1 close = trigger sentuhan M5
         dist = 0.0; sl_entry = entry_adj  # akan di-override SL_FIXED_RANGE di bawah
     else:
-        entry_adj = float(g0['bottom'])   # high[C3]
+        entry_adj = c1_c                  # C1 close = trigger sentuhan M5
         dist = 0.0; sl_entry = entry_adj
 
     import datetime as _dt
