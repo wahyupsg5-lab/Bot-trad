@@ -1181,19 +1181,30 @@ def check_inducement_entry(coin, df_h1, sh_h1, sl_h1):
         prot = idm['prot']
         # SAPUAN di M5: candle M5 SETELAH puncak yang MENYENTUH level IDM (touch, tak harus tembus).
         # Entry HANYA bila sentuhan PERTAMA = candle M5 CLOSED TERAKHIR (sapuan baru, edge-trigger).
-        m5_after = df_m5[df_m5['ts'] > ts_hi]
+        # IDM harus fresh live: trigger hanya valid kalau belum pernah disentuh
+        # sebelum bot jalan. Ini mencegah replay saat redeploy.
+        bot_start_ms = bot_start_ts * 1000
+        # Cek apakah trigger SUDAH pernah disentuh sebelum bot jalan (historis)
+        m5_hist = df_m5[(df_m5['ts'] > ts_hi) & (df_m5['ts'] < bot_start_ms)]
+        if stype == "Long":
+            already_swept = len(m5_hist[m5_hist['low'] <= prot]) > 0
+        else:
+            already_swept = len(m5_hist[m5_hist['high'] >= prot]) > 0
+        if already_swept:
+            continue   # trigger sudah pernah disentuh sebelum bot jalan → skip, tidak fresh
+
+        # Cek sweep dari candle M5 setelah puncak DAN setelah bot_start_ts (live)
+        m5_after = df_m5[(df_m5['ts'] > ts_hi) & (df_m5['ts'] >= bot_start_ms)]
         if len(m5_after) == 0:
             continue
         if stype == "Long":
-            breaches = m5_after.index[m5_after['low'] <= prot]   # touch: low menyentuh/menembus
+            breaches = m5_after.index[m5_after['low'] <= prot]
         else:
-            breaches = m5_after.index[m5_after['high'] >= prot]  # touch: high menyentuh/menembus
+            breaches = m5_after.index[m5_after['high'] >= prot]
         last_closed_idx = df_m5.index[-2]
         if len(breaches) == 0:
-            continue                       # IDM belum disapu di M5 -> monitor
-        # Sweep sudah terjadi — masuk idm_pending untuk monitor engulfing M5.
-        # Filter historis ditangani oleh created_ts di check_m5_engulfing (placed_ts = time.time()),
-        # sehingga engulfing dari candle sebelum bot jalan tidak akan di-trigger.
+            continue                       # IDM belum disapu sejak bot jalan -> tunggu
+        # Sweep terjadi live setelah bot jalan → masuk idm_pending.
         sig = (stype, round(a['choch_level'], 10), round(a['swing_val'], 10))
         if inducement_done.get((coin, stype)) == sig:
             continue                       # struktur ini sudah pernah di-entry -> jangan ulang
@@ -2070,27 +2081,31 @@ def check_m5_engulfing(coin, setup, df_m5, bos_rng):
         cl = float(df_m5['close'].iloc[i])
 
         # ── Cek engulfing DULU sebelum update fokus ──
-        # Entry = ujung candle FOKUS yang dimakan (high fokus untuk Long, low fokus untuk Short)
-        # SL   = ujung lain candle fokus ± SL_ENGULF_PCT × bos_rng
-        if stype == 'Long' and cl > focus_hi:
-            entry_p  = focus_hi                        # high candle fokus = limit entry
-            sl_price = focus_lo - SL_ENGULF_PCT * bos_rng  # low candle fokus - buffer
+        # Engulfing valid hanya jika candle yang sama TIDAK sweep sisi berlawanan.
+        # Kalau sweep sekaligus close (misal Long: lo<=focus_lo DAN cl>focus_hi) → bukan engulfing,
+        # tapi pindah fokus ke candle itu (candle terlalu volatile, tidak bisa dipercaya arahnya).
+        long_sweep_opp = (lo <= focus_lo)   # Long: sweep ke bawah (sisi berlawanan)
+        short_sweep_opp = (hi >= focus_hi)  # Short: sweep ke atas (sisi berlawanan)
+
+        if stype == 'Long' and cl > focus_hi and not long_sweep_opp:
+            entry_p  = focus_hi
+            sl_price = focus_lo - SL_ENGULF_PCT * bos_rng
             print(f"   {coin} {stype}: ENGULFING M5 idx={i} close={cl:.6g} > focus_hi={focus_hi:.6g} "
                   f"→ LIMIT entry={entry_p:.6g} SL={sl_price:.6g}")
             setup['m5_focus_idx'] = i
             return {'entry': entry_p, 'sl': sl_price, 'side': 'Buy',
                     'engulf_idx': i, 'focus_hi': focus_hi, 'focus_lo': focus_lo}
-        if stype == 'Short' and cl < focus_lo:
-            entry_p  = focus_lo                        # low candle fokus = limit entry
-            sl_price = focus_hi + SL_ENGULF_PCT * bos_rng  # high candle fokus + buffer
+        if stype == 'Short' and cl < focus_lo and not short_sweep_opp:
+            entry_p  = focus_lo
+            sl_price = focus_hi + SL_ENGULF_PCT * bos_rng
             print(f"   {coin} {stype}: ENGULFING M5 idx={i} close={cl:.6g} < focus_lo={focus_lo:.6g} "
                   f"→ LIMIT entry={entry_p:.6g} SL={sl_price:.6g}")
             setup['m5_focus_idx'] = i
             return {'entry': entry_p, 'sl': sl_price, 'side': 'Sell',
                     'engulf_idx': i, 'focus_hi': focus_hi, 'focus_lo': focus_lo}
 
-        # ── Update fokus jika wick atau close keluar range fokus ──
-        wick_out       = (hi > focus_hi) or (lo < focus_lo)
+        # ── Update fokus jika wick MENYENTUH (>=/<= bukan hanya >) atau close break ──
+        wick_out       = (hi >= focus_hi) or (lo <= focus_lo)
         close_break_dn = (stype == 'Long'  and cl < focus_lo)
         close_break_up = (stype == 'Short' and cl > focus_hi)
         if wick_out or close_break_dn or close_break_up:
