@@ -160,7 +160,7 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 # ── Strategy params (sinkron dengan backtest.py) ─────────────
 SL_MULT          = 6.2    # SL = SL_MULT × gap_size dari entry (fallback)
 TRAIL_STOP       = 1.0    # trailing distance = TRAIL_STOP × dist (sinkron backtest Trail=0.5R)
-TRAIL_ACT_R      = 4.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
+TRAIL_ACT_R      = 3.0    # trail aktif setelah +TRAIL_ACT_R (Bybit min > trailingStop)
 TRAIL_TIMEOUT_DAYS = 3    # close posisi jika peak tidak bergerak selama N hari (sinkron backtest)
 USE_TP           = False  # False = trailing stop AKTIF (TP fix dimatikan)
 RR_TP            = 9.0    # TP di 1:RR_TP (4.0 = 1:4)
@@ -2557,9 +2557,9 @@ def run_bot():
                 _need_m5 = M5_ENGULF_FILTER and coin in pending
                 df_m5_live = get_data(coin, "5", limit=300) if _need_m5 else None
 
-                # ── INDUCEMENT ENTRY (market, kebalik arah; berdampingan dgn limit FVG) ──
-                if INDUCEMENT_ENTRY and check_inducement_entry(coin, df_h1_live, sh_h1, sl_h1):
-                    continue   # posisi inducement terbuka, koin terkunci
+                # ── INDUCEMENT ENTRY: selalu dicek, terlepas dari pending FVG ──
+                if INDUCEMENT_ENTRY:
+                    check_inducement_entry(coin, df_h1_live, sh_h1, sl_h1)
 
                 # ── PROSES SETUP PENDING (per arah) ──────────────────
                 if coin in pending:
